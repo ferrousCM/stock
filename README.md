@@ -162,6 +162,7 @@ KOSPI+KOSDAQ 약 2,900종목을 개별 조회하면 수 분이 걸립니다. 대
 ```
 
 - **실행과 조회가 분리되어 있습니다.** 실제 매매는 GitHub Actions(`.github/workflows/daily_trading.yml`)가 매 평일 1회(장 마감 후, 19:30 KST 전후) 자동으로 실행하고 원장(`data/portfolio/`)을 직접 커밋합니다 — Streamlit 앱을 누가 방문하는지와 무관합니다. `demo_app.py`의 "모의투자" 페이지는 그 원장을 **읽기만** 합니다.
+- **"기본형"/"공격적"/"모멘텀" 세 봇이 같은 날 나란히 매매합니다** — 판단 로직만 다르고(`src/trading_agent.py`의 `decide_trades`/`decide_trades_aggressive`/`decide_trades_momentum`), 원장은 봇마다 완전히 분리(`data/portfolio/`, `data/portfolio/aggressive/`, `data/portfolio/momentum/`)돼 각자 1억원으로 시작합니다. "모의투자" 페이지는 봇별 탭 + 세 봇을 비교하는 "성과 비교" 탭으로 구성됩니다.
 - 매매 판단은 예측 수익률·RSI·뉴스 감성에 임계값을 적용하는 규칙 엔진(`src/trading_agent.py`)이고, 제안된 매매는 별도 리스크 가드레일(종목당 비중·동시보유·하루 거래횟수·현금 한도)이 한 번 더 검증해 위반 시 거부합니다.
 - 워크플로는 처음엔 `workflow_dispatch`(수동 버튼)로만 동작하도록 커밋돼 있습니다 — GitHub 저장소에서 수동 실행으로 커밋·푸시가 정상인지 확인한 뒤 `daily_trading.yml`의 `schedule` 주석을 해제해야 매일 자동으로 돕니다.
 - GitHub Actions는 `requirements.txt` 전체가 아니라 `requirements-trading.txt`(매매 스크립트에 실제로 필요한 패키지만)를 설치합니다.

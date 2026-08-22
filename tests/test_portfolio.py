@@ -452,3 +452,82 @@ def test_state_json_last_run_date_updates_correctly():
     )
     saved = json.loads(portfolio._STATE_PATH.read_text(encoding="utf-8"))
     assert saved["last_run_date"] == "2026-08-13"
+
+
+# ----------------------------------------------------------- portfolio_dir (다중 봇 원장 분리)
+# 모의투자 봇 다중화(기본형/공격적/모멘텀) — 각 봇이 완전히 분리된 원장에서 읽고 쓰는지
+# 확인한다. 위 테스트들은 모두 portfolio_dir=None(기본값)으로 autouse 픽스처가 monkeypatch한
+# 경로를 쓰는데, 그 경로 자체가 바뀌지 않았으므로 전부 무수정으로 통과해야 한다 — 이게
+# 곧 "기본형 봇 무영향"의 회귀 검증이다.
+
+
+def test_portfolio_dir_isolates_two_bot_instances(tmp_path):
+    dir_a = tmp_path / "bot_a"
+    dir_b = tmp_path / "bot_b"
+
+    holdings_a = portfolio.get_holdings(dir_a)
+    holdings_a, cash_a, trade_a = portfolio.apply_trade(
+        holdings_a,
+        portfolio.INITIAL_CASH,
+        date="2026-08-13",
+        code="005930",
+        name="삼성전자",
+        action="buy",
+        quantity=10,
+        price=70_000,
+        reason="봇A 매수",
+    )
+    portfolio.save_daily_result(
+        date="2026-08-13",
+        cash=cash_a,
+        holdings=holdings_a,
+        new_trades=[trade_a],
+        equity_row={
+            "date": "2026-08-13",
+            "cash": cash_a,
+            "holdings_value": 700_000,
+            "total_equity": cash_a + 700_000,
+            "kospi_close": 3000.0,
+        },
+        portfolio_dir=dir_a,
+    )
+
+    # 봇B는 아직 아무 것도 안 했으므로 초기 상태 그대로여야 한다 — 봇A의 매매가 전혀 안 보임
+    state_b = portfolio.get_state(dir_b)
+    assert state_b == {"cash": portfolio.INITIAL_CASH, "last_run_date": None}
+    assert portfolio.get_holdings(dir_b).empty
+    assert portfolio.get_trades(dir_b).empty
+
+    # 봇A는 반영돼 있어야 한다
+    state_a = portfolio.get_state(dir_a)
+    assert state_a["last_run_date"] == "2026-08-13"
+    trades_a = portfolio.get_trades(dir_a)
+    assert len(trades_a) == 1
+    assert trades_a.iloc[0]["code"] == "005930"
+
+
+def test_portfolio_dir_none_uses_isolated_default_path(tmp_path):
+    """portfolio_dir=None(기본값)은 이 파일의 autouse 픽스처가 monkeypatch한 모듈 상수
+    (_STATE_PATH 등)를 그대로 쓴다 — 명시적 portfolio_dir를 넘긴 다른 봇 원장과 실제
+    파일 경로가 겹치지 않는지 확인한다(초기 상태값 자체는 둘 다 같아 값 비교로는
+    분리를 증명할 수 없으므로 경로를 직접 비교한다)."""
+    other = tmp_path / "other_bot"
+    portfolio.get_holdings(other)  # other_bot 디렉터리 초기화만 트리거
+    assert portfolio.get_state() == portfolio.get_state(other)  # 둘 다 초기 상태라 값은 같지만
+    assert portfolio._STATE_PATH != other / "state.json"  # 실제 파일 경로는 서로 다르다
+
+
+def test_portfolio_dir_creates_missing_directory(tmp_path):
+    """봇 버전 디렉터리(예: data/portfolio/aggressive/)는 최초 호출 시 자동 생성돼야
+    한다 — config.py가 미리 만들어두지 않으므로 portfolio.py가 직접 mkdir 해야 한다."""
+    nested = tmp_path / "aggressive"
+    assert not nested.exists()
+
+    state = portfolio.get_state(nested)
+
+    assert state == {"cash": portfolio.INITIAL_CASH, "last_run_date": None}
+    assert nested.exists()
+    assert (nested / "state.json").exists()
+    assert (nested / "holdings.csv").exists()
+    assert (nested / "trades.csv").exists()
+    assert (nested / "equity_history.csv").exists()

@@ -6,7 +6,18 @@
 
 import pandas as pd
 
-from src.trading_agent import TRADING_RULES, TradeAction, apply_risk_guardrail, decide_trades, infer_market
+from src.trading_agent import (
+    AGGRESSIVE_RULES,
+    BOT_STRATEGIES,
+    MOMENTUM_RULES,
+    TRADING_RULES,
+    TradeAction,
+    apply_risk_guardrail,
+    decide_trades,
+    decide_trades_aggressive,
+    decide_trades_momentum,
+    infer_market,
+)
 
 
 def _holdings(rows: list[dict]) -> pd.DataFrame:
@@ -20,6 +31,8 @@ def _signal(
     rsi14: float = 50,
     news_sentiment: float = 0.0,
     directional_accuracy: float = 0.6,
+    sma5_gap: float | None = None,
+    sma20_gap: float | None = None,
 ) -> dict:
     return {
         "code": code,
@@ -28,6 +41,8 @@ def _signal(
         "rsi14": rsi14,
         "news_sentiment": news_sentiment,
         "directional_accuracy": directional_accuracy,
+        "sma5_gap": sma5_gap,
+        "sma20_gap": sma20_gap,
     }
 
 
@@ -481,3 +496,242 @@ def test_guardrail_approves_fractional_coin_buy():
     )
     assert approved == actions
     assert rejected == []
+
+
+# ==================================================================== decide_trades_aggressive
+
+
+def test_aggressive_buy_accepted_below_default_threshold():
+    """공격적 봇은 기본형 임계값(3%)보다 낮은 수익률(2.5%)도 진입 조건을 만족해야 한다."""
+    signals = [_signal("005930", predicted_return_5d=0.025, rsi14=60, directional_accuracy=0.55)]
+    actions = decide_trades_aggressive(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert len(actions) == 1
+    assert actions[0].action == "buy"
+    assert "공격적 매수 조건 충족" in actions[0].reason
+
+
+def test_aggressive_buy_rejected_below_own_threshold():
+    just_below = AGGRESSIVE_RULES["buy_return_threshold"] - 0.001
+    signals = [_signal("005930", predicted_return_5d=just_below)]
+    actions = decide_trades_aggressive(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert actions == []
+
+
+def test_aggressive_pyramids_into_existing_holding():
+    """기본형(decide_trades)과 구조적으로 다른 지점: 이미 보유 중인 종목도 추가 매수
+    (피라미딩) 후보에 포함된다."""
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 70_000}])
+    signals = [_signal("005930", predicted_return_5d=0.10, rsi14=60, directional_accuracy=0.6)]
+    actions = decide_trades_aggressive(signals, holdings, {"005930": 70_000}, cash=100_000_000)
+    assert len(actions) == 1
+    assert actions[0].action == "buy"
+    assert actions[0].code == "005930"
+    assert "피라미딩" in actions[0].reason
+
+
+def test_aggressive_topup_capped_by_remaining_position_room():
+    """이미 종목당 최대 비중 한도 가까이 들어가 있으면, 남은 여력이 최소 거래금액에
+    못 미쳐 추가 매수가 거부돼야 한다(min_trade_amount는 기본값 100만원 그대로 둔다 —
+    이게 0이면 아무리 적은 여력이라도 통과해버려 이 테스트의 의도가 사라진다)."""
+    rules = {**AGGRESSIVE_RULES, "max_position_pct": 0.10, "min_cash_reserve_pct": 0.0}
+    # total_equity = 1억(현금) + 보유평가액(70,000*150=10,500,000) = 110,500,000
+    # 10% 한도 = 11,050,000원 -> 남은 여력 550,000원인데 min_trade_amount(100만원) 미달
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 150, "avg_price": 70_000}])
+    signals = [_signal("005930", predicted_return_5d=0.10)]
+    actions = decide_trades_aggressive(signals, holdings, {"005930": 70_000}, cash=100_000_000, rules=rules)
+    assert actions == []  # 남은 비중 여력이 최소 거래금액도 못 채움
+
+
+def test_aggressive_sold_today_not_rebought_same_day():
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
+    price = 100_000 * (1 + AGGRESSIVE_RULES["stop_loss_pct"] - 0.001)  # 손절 트리거
+    signals = [_signal("005930", predicted_return_5d=0.20, rsi14=40, directional_accuracy=0.9)]
+    actions = decide_trades_aggressive(signals, holdings, {"005930": price}, cash=100_000_000)
+    assert len(actions) == 1
+    assert actions[0].action == "sell"
+
+
+def test_aggressive_new_position_respects_max_holdings_but_topup_does_not():
+    """동시 보유 종목 수 한도는 신규 진입에만 걸리고, 기존 보유 종목 추가매수는 안 걸린다."""
+    rules = {
+        **AGGRESSIVE_RULES,
+        "max_holdings": 1,
+        "min_cash_reserve_pct": 0.0,
+        "min_trade_amount": 0,
+        "max_position_pct": 1.0,
+    }
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 1, "avg_price": 70_000}])
+    signals = [
+        _signal("005930", predicted_return_5d=0.10),  # 기존 보유 — 추가매수 후보
+        _signal("000660", predicted_return_5d=0.20),  # 신규 종목 — max_holdings=1에 막혀야 함
+    ]
+    prices = {"005930": 70_000, "000660": 100_000}
+    actions = decide_trades_aggressive(signals, holdings, prices, cash=100_000_000, rules=rules)
+    codes = [a.code for a in actions]
+    assert "005930" in codes  # 추가매수는 허용
+    assert "000660" not in codes  # 신규 진입은 한도 초과로 거부
+
+
+def test_aggressive_max_daily_trades_counts_topup_and_new_together():
+    rules = {
+        **AGGRESSIVE_RULES,
+        "max_daily_trades": 1,
+        "max_holdings": 10,
+        "min_cash_reserve_pct": 0.0,
+        "min_trade_amount": 0,
+        "max_position_pct": 1.0,
+    }
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 1, "avg_price": 70_000}])
+    signals = [
+        _signal("005930", predicted_return_5d=0.20),  # 더 높은 수익률 -> 먼저 채택
+        _signal("000660", predicted_return_5d=0.10),
+    ]
+    prices = {"005930": 70_000, "000660": 100_000}
+    actions = decide_trades_aggressive(signals, holdings, prices, cash=100_000_000, rules=rules)
+    assert len(actions) == 1
+    assert actions[0].code == "005930"
+
+
+def test_aggressive_stop_loss_uses_own_wider_threshold():
+    """공격적 룰의 손절폭(-12%)은 기본형(-8%)보다 넓다 — 기본형이라면 손절될 손실률에서
+    공격적 봇은 아직 버텨야 한다."""
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
+    price = 100_000 * (1 + TRADING_RULES["stop_loss_pct"] - 0.001)  # 기본형 손절선은 넘겼지만
+    assert price / 100_000 - 1 > AGGRESSIVE_RULES["stop_loss_pct"]  # 공격적 손절선(-12%)에는 아직 안 닿음
+    actions = decide_trades_aggressive([], holdings, {"005930": price}, cash=0)
+    assert actions == []
+
+
+def test_aggressive_coin_topup_yields_fractional_quantity():
+    holdings = _holdings([{"code": "KRW-BTC", "name": "비트코인", "quantity": 0.1, "avg_price": 150_000_000}])
+    signals = [_signal("KRW-BTC", predicted_return_5d=0.10)]
+    actions = decide_trades_aggressive(signals, holdings, {"KRW-BTC": 150_000_000}, cash=100_000_000)
+    assert len(actions) == 1
+    assert isinstance(actions[0].quantity, float)
+    assert actions[0].quantity > 0
+
+
+# ==================================================================== decide_trades_momentum
+
+
+def test_momentum_buy_accepted_when_trend_aligned():
+    signals = [
+        _signal(
+            "005930",
+            predicted_return_5d=0.01,
+            rsi14=70,
+            directional_accuracy=0.55,
+            sma5_gap=0.02,
+            sma20_gap=0.05,
+        )
+    ]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert len(actions) == 1
+    assert actions[0].action == "buy"
+    assert "정배열" in actions[0].reason
+
+
+def test_momentum_buy_rejected_when_short_term_trend_down():
+    """SMA5 괴리율이 음수면(단기 추세 하락) 중기 추세가 양수여도 정배열이 아니므로 제외."""
+    signals = [_signal("005930", sma5_gap=-0.01, sma20_gap=0.05)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert actions == []
+
+
+def test_momentum_buy_rejected_when_sma_fields_missing():
+    """추세를 확인할 수 없는 신호(sma5_gap/sma20_gap이 없음)는 진입 후보에서 제외한다."""
+    signal = _signal("005930", predicted_return_5d=0.10)
+    del signal["sma5_gap"]
+    del signal["sma20_gap"]
+    actions = decide_trades_momentum([signal], EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert actions == []
+
+
+def test_momentum_buy_rejected_when_predicted_return_negative():
+    """buy_return_threshold가 0.0이므로 예측 수익률이 음수면(추세와 무관하게) 제외된다."""
+    signals = [_signal("005930", predicted_return_5d=-0.01, sma5_gap=0.02, sma20_gap=0.05)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert actions == []
+
+
+def test_momentum_buy_accepted_at_exact_zero_return():
+    signals = [_signal("005930", predicted_return_5d=0.0, sma5_gap=0.02, sma20_gap=0.05)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert len(actions) == 1
+
+
+def test_momentum_allows_entry_above_default_rsi_ceiling():
+    """모멘텀 룰의 RSI 상한(85)은 기본형(70)보다 높다 — 추세 추종은 과매수 구간에서도 진입 허용."""
+    signals = [_signal("005930", rsi14=80, sma5_gap=0.02, sma20_gap=0.05)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert len(actions) == 1
+
+
+def test_momentum_rejects_above_own_rsi_ceiling():
+    just_above = MOMENTUM_RULES["max_rsi_entry"] + 1
+    signals = [_signal("005930", rsi14=just_above, sma5_gap=0.02, sma20_gap=0.05)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"005930": 70_000}, cash=100_000_000)
+    assert actions == []
+
+
+def test_momentum_sorts_candidates_by_trend_strength_not_predicted_return():
+    signals = [
+        _signal("A", predicted_return_5d=0.20, sma5_gap=0.01, sma20_gap=0.01),  # 예측은 높지만 추세는 약함
+        _signal("B", predicted_return_5d=0.01, sma5_gap=0.10, sma20_gap=0.08),  # 예측은 낮지만 추세가 강함
+    ]
+    prices = {"A": 10_000, "B": 10_000}
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, prices, cash=100_000_000)
+    assert [a.code for a in actions] == ["B", "A"]  # 추세 강한 B가 먼저
+
+
+def test_momentum_exit_on_trend_break():
+    """손절/익절/신호소멸/RSI과매수 어디에도 안 걸려도, 추세 이탈(sma20_gap 음전환)이면 매도."""
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
+    # 손익 0%(손절/익절 미해당), 예측수익률 양수(신호소멸 아님), RSI 낮음(과매수 아님)
+    signals = [_signal("005930", predicted_return_5d=0.02, rsi14=40, sma20_gap=-0.01)]
+    actions = decide_trades_momentum(signals, holdings, {"005930": 100_000}, cash=0)
+    assert len(actions) == 1
+    assert "추세 이탈" in actions[0].reason
+
+
+def test_momentum_exit_priority_stop_loss_wins_over_trend_break():
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
+    price = 100_000 * (1 + MOMENTUM_RULES["stop_loss_pct"] - 0.001)  # 손절선을 확실히 넘김
+    signals = [_signal("005930", sma20_gap=-0.05)]  # 추세 이탈 조건도 동시에 만족
+    actions = decide_trades_momentum(signals, holdings, {"005930": price}, cash=0)
+    assert len(actions) == 1
+    assert "손절" in actions[0].reason
+
+
+def test_momentum_sell_price_only_checks_when_no_signal_available():
+    """보유 중인데 signals에 없는 종목 — 가격 기반 손절/익절만 평가되고 추세이탈 등
+    신호 기반 조건은 크래시 없이 건너뛴다."""
+    holdings = _holdings([{"code": "005930", "name": "삼성전자", "quantity": 10, "avg_price": 100_000}])
+    price = 100_000 * (1 + MOMENTUM_RULES["stop_loss_pct"] - 0.001)
+    actions = decide_trades_momentum([], holdings, {"005930": price}, cash=0)
+    assert len(actions) == 1
+    assert "손절" in actions[0].reason
+
+
+def test_momentum_coin_buy_yields_fractional_quantity():
+    price = 150_000_000
+    signals = [_signal("KRW-BTC", predicted_return_5d=0.05, sma5_gap=0.03, sma20_gap=0.02)]
+    actions = decide_trades_momentum(signals, EMPTY_HOLDINGS, {"KRW-BTC": price}, cash=100_000_000)
+    assert len(actions) == 1
+    assert isinstance(actions[0].quantity, float)
+    assert actions[0].quantity > 0
+
+
+# ==================================================================== BOT_STRATEGIES 레지스트리
+
+
+def test_bot_strategies_registry_has_three_bots_with_matching_functions():
+    assert set(BOT_STRATEGIES) == {"default", "aggressive", "momentum"}
+    assert BOT_STRATEGIES["default"]["decide_trades"] is decide_trades
+    assert BOT_STRATEGIES["default"]["rules"] is TRADING_RULES
+    assert BOT_STRATEGIES["aggressive"]["decide_trades"] is decide_trades_aggressive
+    assert BOT_STRATEGIES["aggressive"]["rules"] is AGGRESSIVE_RULES
+    assert BOT_STRATEGIES["momentum"]["decide_trades"] is decide_trades_momentum
+    assert BOT_STRATEGIES["momentum"]["rules"] is MOMENTUM_RULES
+    labels = {meta["label"] for meta in BOT_STRATEGIES.values()}
+    assert labels == {"기본형", "공격적", "모멘텀"}

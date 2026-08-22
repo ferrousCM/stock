@@ -42,6 +42,38 @@ TRADING_RULES = {
     "min_cash_reserve_pct": 0.05,
 }
 
+# 공격적 봇 — 진입 문턱을 낮추고 포지션을 더 크게/많이 가져가며, 손절·익절 폭도 넓혀
+# 변동성을 더 많이 감내한다. decide_trades_aggressive()가 참조한다.
+AGGRESSIVE_RULES = {
+    **TRADING_RULES,
+    "buy_return_threshold": 0.02,
+    "min_directional_accuracy": 0.52,
+    "max_rsi_entry": 80,
+    "min_news_sentiment": -0.5,
+    "stop_loss_pct": -0.12,
+    "take_profit_pct": 0.25,
+    "max_rsi_exit": 85,
+    "max_position_pct": 0.25,
+    "max_holdings": 15,
+    "max_daily_trades": 8,
+    "min_cash_reserve_pct": 0.03,
+}
+
+# 모멘텀 봇 — 진입의 1차 조건이 예측 수익률 크기가 아니라 추세 정렬(SMA5·SMA20 위)이라
+# buy_return_threshold를 0으로 낮춘다("예측이 최소 양전환"만 확인). 추세는 꺾이면 빨리
+# 정리하는 게 전략의 핵심이라 손절·익절 폭은 기본형보다 좁힌다. decide_trades_momentum()이
+# 참조한다.
+MOMENTUM_RULES = {
+    **TRADING_RULES,
+    "buy_return_threshold": 0.0,
+    "min_directional_accuracy": 0.50,
+    "max_rsi_entry": 85,
+    "min_news_sentiment": -0.3,
+    "stop_loss_pct": -0.06,
+    "take_profit_pct": 0.12,
+    "max_rsi_exit": 75,
+}
+
 
 def infer_market(code: str) -> str:
     """종목코드 문자열 패턴만으로 시장을 판별한다 — 원장 스키마에 market 컬럼을 추가하는
@@ -75,6 +107,17 @@ class TradeAction:
 
 def _action_dict(a: TradeAction) -> dict:
     return {"action": a.action, "code": a.code, "quantity": a.quantity, "reason": a.reason}
+
+
+def _calc_quantity(code: str, target_amount: float, price: float) -> int | float:
+    """목표 배분 금액을 그날 가격으로 나눠 매수 수량을 정한다 — 코인은 1주 단위 개념이
+    없고 고가 코인(비트코인 등)은 정수 단위로는 예산 안에서 1개도 못 사는 경우가 흔해
+    소수 8자리로 반올림하고, 그 외(국내/해외증시)는 정수 주 단위로 내림한다. 세 판단
+    함수(decide_trades/_aggressive/_momentum)가 전략은 다르지만 이 수량 산출 로직만은
+    공유한다(전략 차이가 아니라 반복 계산이라 DRY 대상)."""
+    if infer_market(code) == "COIN":
+        return round(target_amount / price, 8)
+    return int(target_amount // price)
 
 
 # ==================================================================== ② 매매 규칙 엔진
@@ -180,22 +223,239 @@ def decide_trades(
         if n_buys >= rules["max_daily_trades"] or n_buys >= room_for_new:
             break
         target_amount = min(total_equity * rules["max_position_pct"], buy_budget)
-        if infer_market(s["code"]) == "COIN":
-            # 코인은 1주 단위 개념이 없고 고가 코인(비트코인 등)은 정수 단위로는 배분
-            # 예산 안에서 1개도 못 사는 경우가 흔하다 — 소수 단위로 산다. 업비트 자체
-            # 주문 단위 소수점 정밀도까지는 맞추지 않고(거래소마다 다르고 이 프로젝트는
-            # 시뮬레이션이라 체결 규칙을 그대로 흉내낼 필요는 없다), 부동소수점 표현
-            # 오차가 누적되지 않도록 소수 8자리로 반올림한다(업비트 실제 주문 정밀도와
-            # 비슷한 수준).
-            quantity = round(target_amount / price, 8)
-        else:
-            quantity = int(target_amount // price)
+        quantity = _calc_quantity(s["code"], target_amount, price)
         amount = quantity * price
         if quantity <= 0 or amount < rules["min_trade_amount"]:
             continue  # 예산이 부족한 후보만 건너뛰고, 더 저렴한 다음 후보는 계속 시도한다
         reason = (
             f"예측 5일 수익률 {s['predicted_return_5d']:+.1%}, "
             f"방향적중률 {s['directional_accuracy']:.0%}, RSI {s['rsi14']:.0f} — 매수 조건 충족"
+        )
+        actions.append(TradeAction(action="buy", code=s["code"], quantity=quantity, reason=reason))
+        buy_budget -= amount
+        n_buys += 1
+
+    return actions
+
+
+def decide_trades_aggressive(
+    signals: list[dict],
+    holdings: pd.DataFrame,
+    current_prices: dict[str, float],
+    cash: float,
+    rules: dict = AGGRESSIVE_RULES,
+) -> list[TradeAction]:
+    """공격적 봇의 매매 판단.
+
+    청산(매도) 조건은 decide_trades()와 완전히 같은 4조건 구조를 그대로 쓴다 — rules만
+    AGGRESSIVE_RULES로 다르게 참조할 뿐, "언제 파는가"의 판단 로직 자체는 다르지 않다.
+
+    신규 매수 후보 산출 방식이 decide_trades()와 구조적으로 다른 지점: decide_trades()는
+    이미 보유 중인 종목을 무조건 신규 매수 후보에서 제외하지만, 이 함수는 **이미 보유한
+    종목도 추가 매수(피라미딩) 후보에 포함**한다 — 공격적 전략은 확신이 큰 포지션을
+    키우는 것도 전략의 일부이기 때문이다. 다만 그 종목의 기존 평가액을 감안해 종목당
+    최대 비중(max_position_pct)을 넘지 않는 만큼만 더 사고, 오늘 이미 매도한 종목만
+    당일 재매수 후보에서 제외한다(휩쏘 방지, decide_trades()와 같은 취지).
+
+    동시 보유 종목 수 한도(max_holdings)는 **신규 진입 종목 수**에만 적용된다 — 기존
+    보유 종목을 추가 매수하는 건 종목 수를 늘리지 않으므로 이 한도에 안 걸린다
+    (apply_risk_guardrail()의 기존 해석과 동일하게 맞춘 것).
+    """
+    signal_by_code = {s["code"]: s for s in signals}
+    actions: list[TradeAction] = []
+
+    # --- 청산: decide_trades()와 완전히 같은 4조건, rules만 AGGRESSIVE_RULES ---
+    for _, row in holdings.iterrows():
+        code = row["code"]
+        price = current_prices.get(code)
+        if price is None:
+            continue
+
+        pnl_pct = (price - row["avg_price"]) / row["avg_price"]
+        signal = signal_by_code.get(code)
+        reason = None
+
+        if pnl_pct <= rules["stop_loss_pct"]:
+            reason = f"평단가 대비 {pnl_pct:+.1%} — 손절 기준({rules['stop_loss_pct']:.0%}) 도달로 매도"
+        elif pnl_pct >= rules["take_profit_pct"]:
+            reason = f"평단가 대비 {pnl_pct:+.1%} — 익절 기준({rules['take_profit_pct']:.0%}) 도달로 매도"
+        elif signal is not None and rules["exit_on_negative_signal"] and signal["predicted_return_5d"] < 0:
+            reason = f"예측 수익률이 {signal['predicted_return_5d']:+.1%}로 음전환 — 신호 소멸로 매도"
+        elif signal is not None and signal["rsi14"] >= rules["max_rsi_exit"]:
+            reason = f"RSI {signal['rsi14']:.0f} — 과매수 구간 진입으로 매도"
+
+        if reason is not None:
+            actions.append(TradeAction(action="sell", code=code, quantity=row["quantity"], reason=reason))
+
+    sold_today = {a.code for a in actions}
+    holdings_after_sells = len(holdings) - len(actions)
+
+    # 오늘 매도한 종목을 뺀 보유 평가액 — 피라미딩 시 "이 종목에 이미 얼마나 들어가
+    # 있는지"를 알아야 종목당 최대 비중을 넘지 않게 추가 매수분을 계산할 수 있다.
+    held_value_by_code = {
+        row["code"]: row["quantity"] * current_prices.get(row["code"], row["avg_price"])
+        for _, row in holdings.iterrows()
+        if row["code"] not in sold_today
+    }
+
+    buy_candidates = []
+    for s in signals:
+        code = s["code"]
+        if code in sold_today:
+            continue  # 당일 매도한 종목만 재매수 후보에서 제외 — 그 외 보유종목은 후보 유지(피라미딩 허용)
+        price = current_prices.get(code)
+        if price is None:
+            continue
+        if s["predicted_return_5d"] < rules["buy_return_threshold"]:
+            continue
+        if s["directional_accuracy"] < rules["min_directional_accuracy"]:
+            continue
+        if s["rsi14"] > rules["max_rsi_entry"]:
+            continue
+        if s["news_sentiment"] < rules["min_news_sentiment"]:
+            continue
+        buy_candidates.append((s, price))
+
+    buy_candidates.sort(key=lambda sp: sp[0]["predicted_return_5d"], reverse=True)
+
+    holdings_value = sum(held_value_by_code.values())
+    total_equity = cash + holdings_value
+    buy_budget = max(cash - total_equity * rules["min_cash_reserve_pct"], 0.0)
+    room_for_new = max(rules["max_holdings"] - holdings_after_sells, 0)
+
+    n_buys = 0
+    n_new_positions = 0
+    for s, price in buy_candidates:
+        code = s["code"]
+        is_topup = code in held_value_by_code
+        if n_buys >= rules["max_daily_trades"]:
+            break
+        if not is_topup and n_new_positions >= room_for_new:
+            continue  # 신규 종목 한도 — 기존 보유 종목 추가매수는 이 한도에 안 걸린다
+
+        existing_value = held_value_by_code.get(code, 0.0)
+        position_cap = total_equity * rules["max_position_pct"]
+        target_amount = min(max(position_cap - existing_value, 0.0), buy_budget)
+        quantity = _calc_quantity(code, target_amount, price)
+        amount = quantity * price
+        if quantity <= 0 or amount < rules["min_trade_amount"]:
+            continue  # 예산 부족한 후보만 건너뛰고 다음 후보를 계속 시도한다
+
+        if is_topup:
+            reason = (
+                f"이미 보유 중 — 예측 5일 수익률 {s['predicted_return_5d']:+.1%}, "
+                f"방향적중률 {s['directional_accuracy']:.0%}, RSI {s['rsi14']:.0f} — 추가 매수(피라미딩)"
+            )
+        else:
+            reason = (
+                f"예측 5일 수익률 {s['predicted_return_5d']:+.1%}, "
+                f"방향적중률 {s['directional_accuracy']:.0%}, RSI {s['rsi14']:.0f} — 공격적 매수 조건 충족"
+            )
+        actions.append(TradeAction(action="buy", code=code, quantity=quantity, reason=reason))
+        buy_budget -= amount
+        held_value_by_code[code] = existing_value + amount
+        n_buys += 1
+        if not is_topup:
+            n_new_positions += 1
+
+    return actions
+
+
+def decide_trades_momentum(
+    signals: list[dict],
+    holdings: pd.DataFrame,
+    current_prices: dict[str, float],
+    cash: float,
+    rules: dict = MOMENTUM_RULES,
+) -> list[TradeAction]:
+    """모멘텀 봇의 매매 판단 — 진입의 1차 조건이 예측 수익률 "크기"가 아니라 **추세
+    정렬**이다. 신호의 sma5_gap/sma20_gap(종가가 SMA5·SMA20 대비 몇 % 위/아래인지 —
+    run_daily_trading.py의 _build_signal()이 indicators.sma()로 계산해 채운다)이 **둘
+    다 양수**여야("정배열", 단기·중기 추세가 함께 상승 중) 매수 후보가 된다. 이 필드가
+    신호에 없으면(구버전 신호 등) 추세를 확인할 수 없으므로 후보에서 제외한다.
+
+    청산은 decide_trades()의 4조건(손절/익절/신호소멸/RSI과매수)에 **추세 이탈**
+    (sma20_gap이 음전환 — 종가가 SMA20 아래로 내려감) 조건이 하나 더 붙는다. 추세를
+    좇는 전략이라 추세가 꺾이면 예측 신호·RSI 값과 무관하게 바로 정리한다 — 그래서
+    이 조건을 손절/익절 다음, 신호소멸/RSI과매수보다 먼저 확인한다.
+    """
+    signal_by_code = {s["code"]: s for s in signals}
+    actions: list[TradeAction] = []
+
+    for _, row in holdings.iterrows():
+        code = row["code"]
+        price = current_prices.get(code)
+        if price is None:
+            continue
+
+        pnl_pct = (price - row["avg_price"]) / row["avg_price"]
+        signal = signal_by_code.get(code)
+        sma20_gap = signal.get("sma20_gap") if signal is not None else None
+        reason = None
+
+        if pnl_pct <= rules["stop_loss_pct"]:
+            reason = f"평단가 대비 {pnl_pct:+.1%} — 손절 기준({rules['stop_loss_pct']:.0%}) 도달로 매도"
+        elif pnl_pct >= rules["take_profit_pct"]:
+            reason = f"평단가 대비 {pnl_pct:+.1%} — 익절 기준({rules['take_profit_pct']:.0%}) 도달로 매도"
+        elif sma20_gap is not None and sma20_gap < 0:
+            reason = f"종가가 SMA20 대비 {sma20_gap:+.1%} — 추세 이탈로 매도"
+        elif signal is not None and rules["exit_on_negative_signal"] and signal["predicted_return_5d"] < 0:
+            reason = f"예측 수익률이 {signal['predicted_return_5d']:+.1%}로 음전환 — 신호 소멸로 매도"
+        elif signal is not None and signal["rsi14"] >= rules["max_rsi_exit"]:
+            reason = f"RSI {signal['rsi14']:.0f} — 과매수 구간 진입으로 매도"
+
+        if reason is not None:
+            actions.append(TradeAction(action="sell", code=code, quantity=row["quantity"], reason=reason))
+
+    held_codes = set(holdings["code"])
+    holdings_after_sells = len(holdings) - len(actions)
+
+    buy_candidates = []
+    for s in signals:
+        code = s["code"]
+        if code in held_codes:
+            continue
+        price = current_prices.get(code)
+        if price is None:
+            continue
+        sma5_gap = s.get("sma5_gap")
+        sma20_gap = s.get("sma20_gap")
+        if sma5_gap is None or sma20_gap is None:
+            continue  # 추세를 확인할 수 없으면 진입하지 않는다
+        if not (sma5_gap > 0 and sma20_gap > 0):
+            continue  # 정배열이 아니면 제외 — 예측 수익률이 아무리 높아도 추세가 우선
+        if s["predicted_return_5d"] < rules["buy_return_threshold"]:
+            continue
+        if s["directional_accuracy"] < rules["min_directional_accuracy"]:
+            continue
+        if s["rsi14"] > rules["max_rsi_entry"]:
+            continue
+        if s["news_sentiment"] < rules["min_news_sentiment"]:
+            continue
+        buy_candidates.append((s, price))
+
+    # 추세 강도(SMA5 괴리율) 내림차순 — 예측 수익률이 아니라 추세가 가장 강한 종목부터 채택
+    buy_candidates.sort(key=lambda sp: sp[0]["sma5_gap"], reverse=True)
+
+    holdings_value = sum(
+        row["quantity"] * current_prices.get(row["code"], row["avg_price"]) for _, row in holdings.iterrows()
+    )
+    total_equity = cash + holdings_value
+    buy_budget = max(cash - total_equity * rules["min_cash_reserve_pct"], 0.0)
+    room_for_new = max(rules["max_holdings"] - holdings_after_sells, 0)
+
+    n_buys = 0
+    for s, price in buy_candidates:
+        if n_buys >= rules["max_daily_trades"] or n_buys >= room_for_new:
+            break
+        target_amount = min(total_equity * rules["max_position_pct"], buy_budget)
+        quantity = _calc_quantity(s["code"], target_amount, price)
+        amount = quantity * price
+        if quantity <= 0 or amount < rules["min_trade_amount"]:
+            continue
+        reason = (
+            f"SMA5 {s['sma5_gap']:+.1%}·SMA20 {s['sma20_gap']:+.1%} 위 정배열, "
+            f"예측 5일 수익률 {s['predicted_return_5d']:+.1%} — 추세 추종 매수 조건 충족"
         )
         actions.append(TradeAction(action="buy", code=s["code"], quantity=quantity, reason=reason))
         buy_budget -= amount
@@ -300,3 +560,16 @@ def apply_risk_guardrail(
         approved.append(a)
 
     return approved, rejected
+
+
+# ==================================================================== 봇 버전 레지스트리
+
+# 모의투자에서 나란히 돌리는 봇들의 단일 소스 — run_daily_trading.py(실행)와
+# pages/모의투자.py(조회)가 각자 하드코딩하지 않고 이 딕셔너리 하나만 순회한다. 봇을
+# 추가/제거할 때 이 등록만 바꾸면 되게 하려는 목적(가드레일은 세 봇이 공유 —
+# apply_risk_guardrail() 자체는 전략이 아니라 한도 검증이라 봇마다 다를 이유가 없다).
+BOT_STRATEGIES = {
+    "default": {"label": "기본형", "decide_trades": decide_trades, "rules": TRADING_RULES},
+    "aggressive": {"label": "공격적", "decide_trades": decide_trades_aggressive, "rules": AGGRESSIVE_RULES},
+    "momentum": {"label": "모멘텀", "decide_trades": decide_trades_momentum, "rules": MOMENTUM_RULES},
+}

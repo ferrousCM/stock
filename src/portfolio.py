@@ -14,6 +14,7 @@ PRD.md 5.4 참고. 이 모듈은 파일 I/O와 잔고 계산만 담당한다. �
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -31,43 +32,66 @@ _TRADES_COLS = ["date", "code", "name", "action", "quantity", "price", "amount",
 _EQUITY_COLS = ["date", "cash", "holdings_value", "total_equity", "kospi_close"]
 
 
-def _ensure_initialized() -> None:
+def _paths(portfolio_dir: Path | None) -> dict[str, Path]:
+    """portfolio_dir가 None이면 모듈 상수(_STATE_PATH 등)를 그대로 참조한다 — 이름으로
+    참조하므로 tests/test_portfolio.py의 monkeypatch.setattr(portfolio, "_STATE_PATH", ...)
+    패턴이 그대로 동작한다(기본 봇 하위호환). portfolio_dir가 주어지면 그 디렉터리 기준으로
+    새 경로 4개를 계산한다 — 봇 버전별(공격적/모멘텀) 원장 분리에 쓴다."""
+    if portfolio_dir is None:
+        return {
+            "state": _STATE_PATH,
+            "holdings": _HOLDINGS_PATH,
+            "trades": _TRADES_PATH,
+            "equity": _EQUITY_PATH,
+        }
+    return {
+        "state": portfolio_dir / "state.json",
+        "holdings": portfolio_dir / "holdings.csv",
+        "trades": portfolio_dir / "trades.csv",
+        "equity": portfolio_dir / "equity_history.csv",
+    }
+
+
+def _ensure_initialized(portfolio_dir: Path | None = None) -> None:
     """원장 파일이 없으면 초기 상태(현금 1억원, 무보유)로 만든다. 매 읽기/쓰기 앞에서 호출."""
-    if not _STATE_PATH.exists():
-        _STATE_PATH.write_text(
+    if portfolio_dir is not None:
+        portfolio_dir.mkdir(parents=True, exist_ok=True)
+    paths = _paths(portfolio_dir)
+    if not paths["state"].exists():
+        paths["state"].write_text(
             json.dumps({"cash": INITIAL_CASH, "last_run_date": None}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    if not _HOLDINGS_PATH.exists():
-        pd.DataFrame(columns=_HOLDINGS_COLS).to_csv(_HOLDINGS_PATH, index=False)
-    if not _TRADES_PATH.exists():
-        pd.DataFrame(columns=_TRADES_COLS).to_csv(_TRADES_PATH, index=False)
-    if not _EQUITY_PATH.exists():
-        pd.DataFrame(columns=_EQUITY_COLS).to_csv(_EQUITY_PATH, index=False)
+    if not paths["holdings"].exists():
+        pd.DataFrame(columns=_HOLDINGS_COLS).to_csv(paths["holdings"], index=False)
+    if not paths["trades"].exists():
+        pd.DataFrame(columns=_TRADES_COLS).to_csv(paths["trades"], index=False)
+    if not paths["equity"].exists():
+        pd.DataFrame(columns=_EQUITY_COLS).to_csv(paths["equity"], index=False)
 
 
-def get_state() -> dict:
+def get_state(portfolio_dir: Path | None = None) -> dict:
     """{"cash": float, "last_run_date": str | None} — last_run_date는 YYYY-MM-DD 또는 아직 한 번도 안 돌았으면 None."""
-    _ensure_initialized()
-    return json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+    _ensure_initialized(portfolio_dir)
+    return json.loads(_paths(portfolio_dir)["state"].read_text(encoding="utf-8"))
 
 
-def get_holdings() -> pd.DataFrame:
+def get_holdings(portfolio_dir: Path | None = None) -> pd.DataFrame:
     """columns: code, name, quantity, avg_price."""
-    _ensure_initialized()
-    return pd.read_csv(_HOLDINGS_PATH, dtype={"code": str})
+    _ensure_initialized(portfolio_dir)
+    return pd.read_csv(_paths(portfolio_dir)["holdings"], dtype={"code": str})
 
 
-def get_trades() -> pd.DataFrame:
+def get_trades(portfolio_dir: Path | None = None) -> pd.DataFrame:
     """columns: date, code, name, action, quantity, price, amount, reason (append-only 이력)."""
-    _ensure_initialized()
-    return pd.read_csv(_TRADES_PATH, dtype={"code": str})
+    _ensure_initialized(portfolio_dir)
+    return pd.read_csv(_paths(portfolio_dir)["trades"], dtype={"code": str})
 
 
-def get_equity_history() -> pd.DataFrame:
+def get_equity_history(portfolio_dir: Path | None = None) -> pd.DataFrame:
     """columns: date, cash, holdings_value, total_equity, kospi_close (일별 자산 스냅샷)."""
-    _ensure_initialized()
-    return pd.read_csv(_EQUITY_PATH)
+    _ensure_initialized(portfolio_dir)
+    return pd.read_csv(_paths(portfolio_dir)["equity"])
 
 
 def apply_trade(
@@ -184,6 +208,7 @@ def save_daily_result(
     holdings: pd.DataFrame,
     new_trades: list[dict],
     equity_row: dict,
+    portfolio_dir: Path | None = None,
 ) -> None:
     """그날의 매매·시가평가 결과를 원장 4개 파일에 반영한다.
 
@@ -194,28 +219,32 @@ def save_daily_result(
 
     equity_row는 매매 건수와 무관하게 매 거래일 반드시 하나씩 쌓인다(호출부 책임 — 관망한
     날에도 보유종목 종가가 바뀌므로 총자산은 변한다).
+
+    portfolio_dir를 넘기면 그 디렉터리의 원장에 쓴다(봇 버전별 분리) — 생략하면 기본형 봇의
+    기존 경로를 그대로 쓴다.
     """
-    _ensure_initialized()
+    _ensure_initialized(portfolio_dir)
+    paths = _paths(portfolio_dir)
 
     # 컬럼 순서를 고정해서 매번 같은 형태로 직렬화되게 한다 — CSV가 안정적인 이유는
     # "내용이 같으면 바이트도 같다"는 성질 덕분인데, 컬럼 순서가 흔들리면 그 성질이 깨진다.
     holdings_out = holdings[_HOLDINGS_COLS].reset_index(drop=True)
 
-    trades_out = get_trades()
+    trades_out = get_trades(portfolio_dir)
     if new_trades:
         trades_out = pd.concat([trades_out, pd.DataFrame(new_trades)[_TRADES_COLS]], ignore_index=True)
 
     equity_out = pd.concat(
-        [get_equity_history(), pd.DataFrame([equity_row])[_EQUITY_COLS]], ignore_index=True
+        [get_equity_history(portfolio_dir), pd.DataFrame([equity_row])[_EQUITY_COLS]], ignore_index=True
     )
 
     # 여기까지는 전부 메모리 위에서만 계산했다 — 디스크에는 아직 아무것도 안 썼다.
-    holdings_out.to_csv(_HOLDINGS_PATH, index=False)
-    trades_out.to_csv(_TRADES_PATH, index=False)
-    equity_out.to_csv(_EQUITY_PATH, index=False)
+    holdings_out.to_csv(paths["holdings"], index=False)
+    trades_out.to_csv(paths["trades"], index=False)
+    equity_out.to_csv(paths["equity"], index=False)
 
     # state.json은 반드시 마지막 — "오늘 실행이 끝났다"는 유일한 신호이기 때문이다.
-    _STATE_PATH.write_text(
+    paths["state"].write_text(
         json.dumps({"cash": cash, "last_run_date": date}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

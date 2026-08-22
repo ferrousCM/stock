@@ -1,9 +1,18 @@
 """모의투자 일일 매매 — GitHub Actions가 매 평일 19:30 KST에 실행하는 단일 진입점.
 
-PRD.md 5.5·10장 3단계 참고. ①(가격예측 신호 생성) → ②(매매 규칙 엔진) → ③(리스크
+PRD.md 5.5·10장 3·8단계 참고. ①(가격예측 신호 생성) → ②(매매 규칙 엔진) → ③(리스크
 가드레일) → ④(포트폴리오 원장 반영)를 순서대로 묶는다. git 커밋은 이 스크립트가 아니라
 `.github/workflows/daily_trading.yml`이 한다 — 여기는 `data/portfolio/` 로컬 파일까지만
 책임진다.
+
+**봇 다중화(8단계)**: "기본형"(기존 그대로) 외에 "공격적"·"모멘텀" 두 봇을 같은 날부터
+나란히 돌려 성과를 비교한다. 세 봇은 `trading_agent.BOT_STRATEGIES`(단일 레지스트리)에
+등록돼 있고, 봇마다 원장 디렉터리가 분리된다(`config.portfolio_dir_for(bot_id)` —
+"기본형"은 기존 `data/portfolio/` 그대로, 나머지는 `data/portfolio/{bot_id}/`). 시세
+스냅샷·예측 신호·뉴스 감성은 계산 비용이 커서(종목별 학습+뉴스 조회) 세 봇이 하루 한 번
+계산한 결과를 공유하고, 그 신호를 "무엇을 살지" 판단하는 함수(`decide_trades`/
+`_aggressive`/`_momentum`)만 봇마다 다르다. 가드레일(`apply_risk_guardrail`)은 전략이
+아니라 한도 검증이라 세 봇이 공유한다.
 
 국내(KOSPI/KOSDAQ)·해외증시(나스닥)·코인(업비트) 세 시장을 함께 매매한다. 원장은 단일
 원화(KRW) 기준이라, 해외증시 시세만 그날 환율로 원화 환산해서 이후 파이프라인(현금·
@@ -26,10 +35,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
-from src import crypto_loader, crypto_news, crypto_screener, news, portfolio, predictor, screener, us_screener
+from src import (
+    config,
+    crypto_loader,
+    crypto_news,
+    crypto_screener,
+    news,
+    portfolio,
+    predictor,
+    screener,
+    us_screener,
+)
 from src import data_loader as dl
 from src import indicators as ind
-from src.trading_agent import apply_risk_guardrail, decide_trades, infer_market
+from src.trading_agent import BOT_STRATEGIES, apply_risk_guardrail, infer_market
 
 WATCHLIST_SIZE = 40  # PRD 5.1 — 종목별 개별 학습이 필요해 전종목이 아니라 워치리스트로 제한
 # 해외증시·코인은 이번에 새로 추가된 시장이라 국내보다 작은 워치리스트로 시작한다 —
@@ -41,11 +60,16 @@ PREDICT_HORIZON = 5  # 매매 규칙(TRADING_RULES)이 5거래일 예측 수익�
 
 
 def _build_signal(code: str, name: str) -> dict | None:
-    """종목 하나의 매매 신호(예측 5일 수익률·RSI·뉴스감성·방향적중률)를 만든다.
+    """종목 하나의 매매 신호(예측 5일 수익률·RSI·뉴스감성·방향적중률·추세정렬)를 만든다.
 
     `infer_market(code)`로 시장을 판별해 가격 이력·뉴스 소스를 그 시장에 맞는 걸로
     가져온다 — 예측 수익률(%)·RSI·방향적중률은 전부 비율/등급이라 통화와 무관하므로
     여기서는 환율 환산이 필요 없다(환산은 run()이 current_prices를 만들 때 한 번만 한다).
+
+    sma5_gap/sma20_gap(종가가 SMA5·SMA20 대비 몇 % 위/아래인지)은 모멘텀 봇
+    (`trading_agent.decide_trades_momentum`) 전용 필드다 — 이미 받은 price_df에서
+    `indicators.sma()`로 바로 계산하므로 추가 네트워크 호출이 없다. 기본형·공격적 봇은
+    이 필드를 보지 않는다.
 
     가격 이력 부족·예측 실패 등으로 신호를 못 만들면 None — 호출부가 그 종목을
     이번 판단에서 스킵한다(워치리스트 종목이면 매수 후보에서 빠지고, 보유 종목이면
@@ -78,6 +102,13 @@ def _build_signal(code: str, name: str) -> dict | None:
 
     news_sentiment = float(news_df["sentiment_score"].mean()) if not news_df.empty else 0.0
 
+    close = price_df["Close"]
+    last_close = float(close.iloc[-1])
+    sma5 = ind.sma(close, 5).iloc[-1]
+    sma20 = ind.sma(close, 20).iloc[-1]
+    sma5_gap = float(last_close / sma5 - 1) if pd.notna(sma5) else None
+    sma20_gap = float(last_close / sma20 - 1) if pd.notna(sma20) else None
+
     return {
         "code": code,
         "name": name,
@@ -85,17 +116,103 @@ def _build_signal(code: str, name: str) -> dict | None:
         "rsi14": float(rsi14),
         "news_sentiment": news_sentiment,
         "directional_accuracy": result["directional_accuracy"],
+        "sma5_gap": sma5_gap,
+        "sma20_gap": sma20_gap,
     }
+
+
+def _run_bot(
+    bot_id: str,
+    today_str: str,
+    holdings: pd.DataFrame,
+    cash: float,
+    signals: list[dict],
+    current_prices: dict[str, float],
+    name_by_code: dict[str, str],
+    held_names: dict[str, str],
+    kospi_close: float | None,
+    dry_run: bool,
+) -> None:
+    """봇 하나(BOT_STRATEGIES 항목 하나)의 판단→가드레일→체결→시가평가→원장 반영을
+    끝까지 수행한다. 원장이 봇마다 분리돼 있어 이 호출 하나가 완결된 단위다 — run()이
+    봇별로 이 함수를 try/except로 감싸서 한 봇의 실패가 다른 봇에 번지지 않게 한다."""
+    meta = BOT_STRATEGIES[bot_id]
+    label = meta["label"]
+    rules = meta["rules"]
+    portfolio_dir = config.portfolio_dir_for(bot_id)
+
+    actions = meta["decide_trades"](signals, holdings, current_prices, cash, rules=rules)
+    approved, rejected = apply_risk_guardrail(actions, holdings, cash, current_prices, rules=rules)
+
+    for r in rejected:
+        print(f"  [{label}] 거부: {r['action']} {r['code']} x{r['quantity']} — {r['reason_rejected']}")
+
+    new_trades = []
+    for a in approved:
+        price = current_prices[a.code]
+        name = name_by_code.get(a.code, held_names.get(a.code, a.code))
+        holdings, cash, trade = portfolio.apply_trade(
+            holdings,
+            cash,
+            date=today_str,
+            code=a.code,
+            name=name,
+            action=a.action,
+            quantity=a.quantity,
+            price=price,
+            reason=a.reason,
+        )
+        new_trades.append(trade)
+        unit_label = "개" if infer_market(a.code) == "COIN" else "주"
+        print(
+            f"  [{label}] 체결: {a.action} {a.code}({name}) {a.quantity}{unit_label} @ {price:,.0f}원 — {a.reason}"
+        )
+
+    holdings_mtm, holdings_value = portfolio.mark_to_market(holdings, current_prices)
+    stale = holdings_mtm[holdings_mtm["price_is_stale"]] if not holdings_mtm.empty else holdings_mtm
+    for _, row in stale.iterrows():
+        print(f"  [{label}] 주의: {row['code']}({row['name']}) 오늘 종가를 못 가져와 평단가로 대체 평가")
+
+    total_equity = cash + holdings_value
+    equity_row = {
+        "date": today_str,
+        "cash": cash,
+        "holdings_value": holdings_value,
+        "total_equity": total_equity,
+        "kospi_close": kospi_close,
+    }
+
+    n_buy = sum(1 for a in approved if a.action == "buy")
+    n_sell = sum(1 for a in approved if a.action == "sell")
+    print(
+        f"[{today_str}] [{label}] 매수 {n_buy}건, 매도 {n_sell}건. "
+        f"총자산 {total_equity:,.0f}원 (현금 {cash:,.0f} + 평가금액 {holdings_value:,.0f})"
+    )
+
+    if dry_run:
+        print(f"[dry-run] [{label}] 원장을 갱신하지 않았습니다.")
+        return
+
+    portfolio.save_daily_result(
+        today_str, cash, holdings, new_trades, equity_row, portfolio_dir=portfolio_dir
+    )
+    print(f"[{today_str}] [{label}] 원장 갱신 완료.")
 
 
 def run(dry_run: bool = False) -> None:
     today = pd.Timestamp.now(tz="Asia/Seoul").normalize().tz_localize(None)
     today_str = today.strftime("%Y-%m-%d")
 
-    state = portfolio.get_state()
-    if state["last_run_date"] == today_str:
-        print(f"[{today_str}] 오늘은 이미 실행했습니다(last_run_date={state['last_run_date']}) — 종료.")
+    # 봇마다 원장이 분리돼 있어(config.portfolio_dir_for) last_run_date도 봇별로 다를 수
+    # 있다 — 전부 오늘 이미 돌았으면 시세/신호 계산(비용이 큼) 자체를 생략한다.
+    bot_states = {bot_id: portfolio.get_state(config.portfolio_dir_for(bot_id)) for bot_id in BOT_STRATEGIES}
+    pending_bots = [bot_id for bot_id, s in bot_states.items() if s["last_run_date"] != today_str]
+    if not pending_bots:
+        print(f"[{today_str}] 모든 봇이 오늘 이미 실행했습니다 — 종료.")
         return
+    if len(pending_bots) < len(BOT_STRATEGIES):
+        already = [BOT_STRATEGIES[b]["label"] for b in BOT_STRATEGIES if b not in pending_bots]
+        print(f"[{today_str}] {', '.join(already)} 봇은 오늘 이미 실행했습니다 — 나머지만 진행.")
 
     try:
         kr_snapshot = screener.screen(market="ALL", days_back=7)
@@ -136,11 +253,18 @@ def run(dry_run: bool = False) -> None:
     except Exception as e:
         print(f"[{today_str}] 코인 시세를 가져오지 못했습니다 ({e}) — 코인 후보 없이 진행.")
 
-    holdings = portfolio.get_holdings()
-    cash = state["cash"]
-    held_names = dict(zip(holdings["code"], holdings["name"], strict=True))
+    # 봇마다 원장이 분리돼 있으므로 holdings/cash도 봇별로 따로 갖고 있어야 한다 —
+    # 신호 계산(비용이 큼)만 세 봇이 공유한다.
+    bot_holdings = {
+        bot_id: portfolio.get_holdings(config.portfolio_dir_for(bot_id)) for bot_id in pending_bots
+    }
+    held_names: dict[str, str] = {}
+    held_codes: set[str] = set()
+    for holdings in bot_holdings.values():
+        held_names.update(dict(zip(holdings["code"], holdings["name"], strict=True)))
+        held_codes |= set(holdings["code"])
 
-    candidate_codes = sorted(watchlist_codes | set(holdings["code"]))
+    candidate_codes = sorted(watchlist_codes | held_codes)
 
     signals = []
     skipped = []
@@ -157,65 +281,30 @@ def run(dry_run: bool = False) -> None:
             signals.append(sig)
 
     print(
-        f"[{today_str}] 워치리스트 {len(watchlist_codes)}종목(국내+해외+코인) + 보유 {len(holdings)}종목 중 "
-        f"신호 {len(signals)}개 생성, {len(skipped)}개 스킵"
+        f"[{today_str}] 워치리스트 {len(watchlist_codes)}종목(국내+해외+코인) + 보유(전 봇 합집합) "
+        f"{len(held_codes)}종목 중 신호 {len(signals)}개 생성, {len(skipped)}개 스킵"
     )
-
-    actions = decide_trades(signals, holdings, current_prices, cash)
-    approved, rejected = apply_risk_guardrail(actions, holdings, cash, current_prices)
-
-    for r in rejected:
-        print(f"  거부: {r['action']} {r['code']} x{r['quantity']} — {r['reason_rejected']}")
-
-    new_trades = []
-    for a in approved:
-        price = current_prices[a.code]
-        name = name_by_code.get(a.code, held_names.get(a.code, a.code))
-        holdings, cash, trade = portfolio.apply_trade(
-            holdings,
-            cash,
-            date=today_str,
-            code=a.code,
-            name=name,
-            action=a.action,
-            quantity=a.quantity,
-            price=price,
-            reason=a.reason,
-        )
-        new_trades.append(trade)
-        unit_label = "개" if infer_market(a.code) == "COIN" else "주"
-        print(f"  체결: {a.action} {a.code}({name}) {a.quantity}{unit_label} @ {price:,.0f}원 — {a.reason}")
-
-    holdings_mtm, holdings_value = portfolio.mark_to_market(holdings, current_prices)
-    stale = holdings_mtm[holdings_mtm["price_is_stale"]] if not holdings_mtm.empty else holdings_mtm
-    for _, row in stale.iterrows():
-        print(f"  주의: {row['code']}({row['name']}) 오늘 종가를 못 가져와 평단가로 대체 평가")
 
     kospi_df = dl.get_price("KOSPI")
     kospi_close = float(kospi_df["Close"].iloc[-1]) if not kospi_df.empty else None
 
-    total_equity = cash + holdings_value
-    equity_row = {
-        "date": today_str,
-        "cash": cash,
-        "holdings_value": holdings_value,
-        "total_equity": total_equity,
-        "kospi_close": kospi_close,
-    }
-
-    n_buy = sum(1 for a in approved if a.action == "buy")
-    n_sell = sum(1 for a in approved if a.action == "sell")
-    print(
-        f"[{today_str}] 매수 {n_buy}건, 매도 {n_sell}건. "
-        f"총자산 {total_equity:,.0f}원 (현금 {cash:,.0f} + 평가금액 {holdings_value:,.0f})"
-    )
-
-    if dry_run:
-        print("[dry-run] 원장을 갱신하지 않았습니다.")
-        return
-
-    portfolio.save_daily_result(today_str, cash, holdings, new_trades, equity_row)
-    print(f"[{today_str}] 원장 갱신 완료.")
+    for bot_id in pending_bots:
+        label = BOT_STRATEGIES[bot_id]["label"]
+        try:
+            _run_bot(
+                bot_id=bot_id,
+                today_str=today_str,
+                holdings=bot_holdings[bot_id],
+                cash=bot_states[bot_id]["cash"],
+                signals=signals,
+                current_prices=current_prices,
+                name_by_code=name_by_code,
+                held_names=held_names,
+                kospi_close=kospi_close,
+                dry_run=dry_run,
+            )
+        except Exception as e:
+            print(f"[{today_str}] [{label}] 실행 중 오류로 이 봇은 이번 실행을 건너뜁니다: {e}")
 
 
 def main() -> None:

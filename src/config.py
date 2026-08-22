@@ -21,6 +21,14 @@ PORTFOLIO_DIR = DATA_DIR / "portfolio"  # 모의투자 원장 (git으로 추적 
 for _d in (RAW_DIR, CACHE_DIR, OUTPUT_DIR, PORTFOLIO_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+
+def portfolio_dir_for(bot_id: str) -> Path:
+    """봇 버전별 원장 디렉터리. "default"는 기존 경로(data/portfolio/)를 그대로 쓴다 —
+    이미 매일 자동 실행되며 커밋되는 라이브 원장이라 마이그레이션하지 않는다. 그 외 봇은
+    data/portfolio/{bot_id}/ 아래 완전히 새 원장에서 시작한다."""
+    return PORTFOLIO_DIR if bot_id == "default" else PORTFOLIO_DIR / bot_id
+
+
 # 데이터 조회 기본 시작일 (지정 안 하면 여기서부터)
 DEFAULT_START = "2015-01-01"
 
