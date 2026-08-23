@@ -29,6 +29,14 @@ def portfolio_dir_for(bot_id: str) -> Path:
     return PORTFOLIO_DIR if bot_id == "default" else PORTFOLIO_DIR / bot_id
 
 
+def portfolio_dir_for_v2(bot_id: str) -> Path:
+    """v2 봇(PRD.md 11장) 원장 디렉터리. v1의 `portfolio_dir_for()`와 달리 "default"도
+    특별 취급하지 않는다 — v2의 세 봇 전부 data/portfolio/v2/{bot_id}/ 아래 완전히 새
+    원장(1억원)으로 시작한다. v2 "기본형"이 v1의 라이브 원장(data/portfolio/)을 실수로
+    재사용하는 사고를 막으려고 함수 자체를 분리했다(PRD 11.2)."""
+    return PORTFOLIO_DIR / "v2" / bot_id
+
+
 # 데이터 조회 기본 시작일 (지정 안 하면 여기서부터)
 DEFAULT_START = "2015-01-01"
 

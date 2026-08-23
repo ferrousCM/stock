@@ -9,7 +9,7 @@ import json
 import pandas as pd
 import pytest
 
-from src import portfolio
+from src import config, portfolio
 
 
 @pytest.fixture(autouse=True)
@@ -531,3 +531,22 @@ def test_portfolio_dir_creates_missing_directory(tmp_path):
     assert (nested / "holdings.csv").exists()
     assert (nested / "trades.csv").exists()
     assert (nested / "equity_history.csv").exists()
+
+
+# ----------------------------------------------------------- config.portfolio_dir_for_v2 (PRD.md 11.2)
+
+
+def test_portfolio_dir_for_v2_never_reuses_v1_live_default_path():
+    """v2 "기본형"이 v1의 라이브 원장(data/portfolio/, GitHub Actions가 매일 갱신 중)을
+    실수로 재사용하면 실제 운영 자산 데이터가 오염된다 — v1의 portfolio_dir_for()는
+    "default"를 config.PORTFOLIO_DIR 그대로 특별 취급하지만, v2는 절대 그렇게 하지
+    않는다는 것이 이 함수 설계의 핵심 안전장치(PRD 11.2)다."""
+    assert config.portfolio_dir_for_v2("default") != config.portfolio_dir_for("default")
+    assert config.portfolio_dir_for_v2("default") != config.PORTFOLIO_DIR
+
+
+def test_portfolio_dir_for_v2_isolates_all_three_bots():
+    dirs = {bot_id: config.portfolio_dir_for_v2(bot_id) for bot_id in ("default", "aggressive", "momentum")}
+    assert len(set(dirs.values())) == 3  # 서로 겹치지 않는 세 경로
+    for path in dirs.values():
+        assert path.parent == config.PORTFOLIO_DIR / "v2"

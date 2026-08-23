@@ -1,6 +1,7 @@
 # PRD — 모의투자(페이퍼 트레이딩) 기능
 
 - **상태**: 0~5단계 완료 + `schedule`(자동 cron, 평일 19:30 KST) 활성화까지 완료(2026-08-14) — 이제 평일마다 자동으로 돈다. 7단계(국내+해외+코인 확장)에 이어 **8단계(봇 다중화 — 기본형/공격적/모멘텀, 2026-08-22)까지 완료**. 다음은 6단계에서 미뤄둔 관찰(영향 관찰은 계속 진행 중)과 9장의 향후 확장 검토 — 10장 참고 — v4 (매매 의사결정을 **LLM 기반 → 규칙 기반(결정론적)으로 전환**. 유료 서비스인 Claude API 키 발급·비용을 지금 단계에서는 넘기고 싶다는 사용자 결정에 따름. LLM 경로는 폐기가 아니라 9장에 향후 옵션으로 보존)
+- **v2 (신규, 2026-08-22 설계 착수, 구현 전)**: 기존 v1과 완전히 분리된 두 번째 매매 파이프라인. `tradermonty/claude-trading-skills`(Claude Code 스킬 마켓플레이스, 별도로 `~/.claude/skills/`에 설치)의 방법론(포지션사이징·기술적 분석·모멘텀 버스트 스크리닝)을 **결정론적 파이썬 코드로 포팅**해 v1과 나란히 돌린다. 상세 설계는 **11장**. v1 원장·워크플로·UI는 전혀 건드리지 않는다.
 - **관련 문서**: [CLAUDE.md](./CLAUDE.md) `## 모의투자(페이퍼 트레이딩) 기능` 섹션에 컨벤션 요약
 - **스코프**: 이 문서는 기존 스크리닝/차트/예측 대시보드에 새로 추가하는 "모의투자" 기능 하나에 한정한다. 기존 기능의 PRD를 소급 작성하지 않는다.
 
@@ -456,3 +457,400 @@ pg.run()
    다른 판단(기본형 손절 매도/공격적 신규 매수/모멘텀 관망)을 내는 것을 확인, `streamlit.
    testing.v1.AppTest`로 4개 탭 전환·지표 렌더링 예외 없음 확인, `streamlit run demo_app.py`
    실제 서버 기동 확인.
+
+## 11. 모의투자 버전2(v2) — Claude Trading Skills 방법론 포팅
+
+**상태: 설계만 완료, 구현 전 (2026-08-22).** 이 장은 독립된 새 기능이 아니라 v1과 **완전히
+분리된 두 번째 실행·조회 파이프라인**이다 — 원장·워크플로·UI 모두 새로 만들고, v1의 기존
+원장(`data/portfolio/`, `data/portfolio/aggressive/`, `data/portfolio/momentum/`)과 실행
+스크립트(`scripts/run_daily_trading.py`)는 v1 관련 로직·값은 그대로 두고 v2 로직만 옆에
+추가한다(11.5 참고 — 신호 계산은 공유해도 v1 판단·체결·원장 반영 경로는 손대지 않는다).
+
+### 11.0 이 장이 존재하는 이유 — "스킬을 이용한다"의 재정의
+
+사용자가 이전 대화에서 추천받았던 `tradermonty/claude-trading-skills`를 실제로 설치해보고
+(본 세션 앞부분), "국내+미국+코인을 다 포함하는 플러그인"을 요청했을 때 조사 결과 **KRX를
+지원하는 스킬은 존재하지 않는다**는 것이 확인됐다 — 모든 스킬이 미국 시장 API(FMP 등) 또는
+크립토 API 기준이었다. 게다가 이 스킬들은 애초에 **Claude가 대화 세션에서 읽고 해석해
+실행하는 마크다운 지침**이지, GitHub Actions cron이 매일 19:30 KST에 호출할 파이썬
+함수가 아니다 — 문자 그대로 "스킬을 실행"하려면 매매 판단마다 Claude API를 호출해야 하고,
+이는 PRD 9.1에 이미 "유료라서 지금은 보류"로 기록된 LLM 경로를 그대로 되살리는 것과
+같다.
+
+그래서 v2 착수 전에 세 가지 선택지(① 결정론적 포팅 — API 비용 $0, ② 실제 LLM 판단 — 월
+$1~2대, ③ 설계 단계에서만 스킬 참고 + 실행은 결정론적)를 사용자에게 제시했고,
+**①(결정론적 포팅)을 확정**했다. 즉 v2가 "tradermonty를 이용한다"는 것은:
+
+- ✅ 스킬 문서에 적힌 **수식·임계값·판단 로직**을 읽고 그대로 파이썬 함수로 옮긴다
+- ✅ 실행 시점엔 Claude API 호출이 전혀 없다 — v1과 동일하게 $0, 신규 시크릿 없음
+- ❌ 스킬 스크립트(`scripts/*.py`)를 그대로 실행하지 않는다 — 대부분 FMP API 키가
+  필요하고 미국 주식 전용이라 이 프로젝트의 KR+US+코인 데이터 계약과 맞지 않는다
+- ❌ 스킬이 요구하는 입력(예: 주간 차트 이미지)을 그대로 쓰지 않는다 — 방법론(추세
+  판정 기준, 사이징 공식)만 가져오고, 입력은 이 프로젝트가 이미 갖고 있는 일봉 OHLCV로
+  대체한다
+
+### 11.1 스킬 → 봇 매핑 (근거: 실제 설치된 SKILL.md 원문 확인)
+
+v1과 동일하게 **기본형/공격적/모멘텀** 세 봇 구조를 유지한다. 판단 로직만 스킬 방법론
+기반으로 새로 만들고, 시세·예측·뉴스감성 신호 계산과 리스크 가드레일은 v1과 최대한
+공유한다(11.5).
+
+| 봇 | 포팅 대상 스킬 | 가져오는 것 | 버리는 것(이 프로젝트에 안 맞음) |
+|---|---|---|---|
+| **기본형** | `technical-analyst` + `position-sizer` | MA 정렬(가격이 단기·중기 이평선 위, 이평선끼리도 정배열)로 추세를 분류하는 기준 / **ATR 기반 변동성 조정 손절폭**과 **계좌 리스크 1% 룰**로 포지션 크기를 정하는 공식(Fixed Fractional) | 주간 차트 이미지 입력, 확률 시나리오 리포트 생성(사람이 읽는 리포트이지 자동매매 입력이 아님) |
+| **공격적** | `vcp-screener`(Minervini VCP) + `position-sizer` | **변동성 수축**(최근 N일 ATR이 그 이전 N일보다 좁아짐) + **N일 고점 근접**(피벗 부근)이라는 셋업 개념, ATR 배수를 넓히고 리스크%를 올리는 공격적 사이징. v1 공격적 봇의 **피라미딩 허용** 구조는 그대로 유지 | FMP API 의존 스크리닝 파이프라인, S&P500 유니버스 한정, 거래량 마른 정도의 정교한 스코어링(이 프로젝트 데이터로는 근사만 가능) |
+| **모멘텀** | `stockbee-momentum-burst-screener` | **4% 브레이크아웃**(종가가 전일 대비 임계값 이상 급등) + **거래량 확장**(전일 대비) + **레인지 확장**(최근 3일 대비) + **종가 위치**(고가 근처 마감일수록 강한 신호)라는 4개 트리거 조합 | FMP 실시간 유니버스 스캔, 분 단위 조건, "시장 게이트"(별도 시장국면 판정 스킬 — 이 프로젝트엔 없음, 12장 향후 확장 후보) |
+
+`backtest-expert`는 어느 봇의 런타임 로직에도 들어가지 않는다 — **11.7(0단계)** 검증
+절차에서 방법론(파라미터 민감도, 최소 표본 수, 워크포워드)만 빌려 쓴다.
+
+### 11.2 신규/변경 모듈
+
+| 파일 | 상태 | 내용 |
+|---|---|---|
+| `src/trading_agent_v2.py` | 신규 | `decide_trades_v2_default` / `_aggressive` / `_momentum` + `TRADING_RULES_V2` 계열 + `BOT_STRATEGIES_V2` 레지스트리. **`trading_agent.py`는 뜯어고치지 않는다** — v1 코드는 8단계 완료 시점 그대로 둔다(라이브 원장을 매일 갱신 중인 코드라 리스크를 최소화). `infer_market()`·`TradeAction`·`apply_risk_guardrail()`은 `trading_agent.py`에서 그대로 import해 재사용(전략이 아니라 공통 유틸이므로 중복 정의하지 않는다). |
+| `src/indicators.py` | 변경(함수 추가만) | `atr(df, window=14)` 신규 — 표준 Average True Range(전일 종가 기준 True Range의 이동평균). 기존 함수는 하나도 안 건드린다. market-agnostic이라 KR/US/코인 어디든 그대로 쓴다. |
+| `config.py` | 변경(함수 추가만) | `portfolio_dir_for_v2(bot_id)` 신규 — **"default"를 포함한 세 봇 전부** `data/portfolio/v2/{bot_id}/`에 새 원장(1억원)으로 시작한다. 기존 `portfolio_dir_for()`(v1용, "default"만 특별 취급)는 그대로 둔다 — v2의 "기본형"이 v1의 라이브 원장(`data/portfolio/`)을 절대 재사용하지 않도록 함수 자체를 분리하는 것이 실수 방지책이다. |
+| `scripts/run_daily_trading.py` | 변경(추가만) | `_build_signal()`에 v2 전용 필드(`atr14`, `atr_contraction_ratio`, `dist_from_high_pct`, `volume_ratio_1d`, `range_ratio_3d`, `close_location`) 추가 — 이미 갖고 있는 `price_df`에서 계산하므로 신규 네트워크 호출 없음(sma5_gap/sma20_gap과 동일한 패턴). `run()` 마지막에 v1 봇 루프와 나란히 v2 봇 루프를 추가(11.5). |
+| `pages/모의투자_v2.py` | 신규 | v2 전용 리포팅 페이지. **"모의투자" 탭과 동일한 프레임**(요약 지표 4개 → 자산추이 차트 → 보유종목 → 거래내역 → 거래요약 → 성과비교 탭)을 쓰되, 데이터 소스는 `BOT_STRATEGIES_V2`/`portfolio_dir_for_v2`. |
+| `src/portfolio_ui.py` | 신규(리팩터) | `pages/모의투자.py`의 `_render_bot_dashboard()`/`_render_comparison()`과 그 보조 함수들(`_change_html`, `_trades_show_df`, `_color_action`, `_stock_detail_dialog` 등)을 그대로 옮긴다 — 이미 `(bot_id, label, portfolio_dir)` 세 인자만 받는 순수 렌더 함수라 로직 변경 없이 이동만 하면 된다. `pages/모의투자.py`와 `pages/모의투자_v2.py` 둘 다 이 모듈을 import해서 **"기본 프레임 동일 유지"** 요구사항을 코드 중복 없이 만족시킨다. |
+| `demo_app.py` | 변경(1줄 추가) | `st.Page("pages/모의투자_v2.py", title="모의투자(ver2)", icon="💰")`를 "모의투자" 바로 아래에 추가. |
+| `.github/workflows/daily_trading.yml` | 변경 없음(확인만) | v2 봇 실행이 `run_daily_trading.py` 안에 통합되므로(11.5) 워크플로 자체는 안 바뀐다. `git add data/portfolio/`가 `data/portfolio/v2/**`까지 재귀로 잡는지만 `git add --dry-run`으로 재확인(8단계 때 한 번 걸렸던 함정 재발 방지). |
+
+`.gitignore`는 **변경이 필요 없다** — 8단계에서 고친 `!data/portfolio/**/*.csv`는 이미
+임의 깊이(`data/portfolio/v2/default/holdings.csv`)까지 재귀 매치하고, `state.json`은 애초에
+`*.json` 전역 규칙이 없어(`git ls-files`로 확인) 별도 예외 없이도 추적된다. 구현
+착수 시 `git add --dry-run data/portfolio/v2/`로 실제 추적 대상이 되는지 한 번 더
+확인하는 것을 권장(위 표의 워크플로 행과 동일한 이유).
+
+### 11.3 v2 리스크 규칙 — 핵심은 "고정 비중" → "리스크 기반 사이징"으로 전환
+
+v1의 모든 봇은 포지션 크기를 **"총자산의 고정 %"**(`max_position_pct`)로 정했다. v2는
+`position-sizer` 스킬의 핵심 아이디어인 **"몇 % 배분할지가 아니라 얼마나 잃을 각오를
+하는지로 크기를 정한다"**(Fixed Fractional / ATR 기반)를 그대로 포팅한다:
+
+```python
+# src/trading_agent_v2.py (설계 — 아직 구현 전)
+TRADING_RULES_V2_DEFAULT = {
+    "risk_pct_per_trade": 0.01,     # 계좌 자산의 1% — position-sizer "1% rule"
+    "atr_multiplier": 2.0,          # 손절 = 진입가 - ATR14 × 2.0 (position-sizer ATR 모드 기본값)
+    "min_ma_alignment": True,       # 종가 > SMA20 > SMA60 (technical-analyst MA 정렬 기준을
+                                     # 이 프로젝트가 이미 계산 중인 SMA20/60으로 포팅)
+    "min_directional_accuracy": 0.55,   # v1과 동일 — 예측 신뢰도 필터는 그대로 유지
+    "min_news_sentiment": -0.3,
+    "take_profit_atr_multiplier": 3.0,  # 익절 = 진입가 + ATR14 × 3.0
+    "max_rsi_entry": 70,
+    "max_rsi_exit": 80,
+    "exit_on_negative_signal": True,
+    # 아래 4개는 v1 TRADING_RULES와 동일한 구조 — apply_risk_guardrail()을 그대로 재사용하기
+    # 위해 반드시 같은 키 이름을 쓴다
+    "max_position_pct": 0.15,
+    "max_holdings": 10,
+    "min_trade_amount": 1_000_000,
+    "max_daily_trades": 5,
+    "min_cash_reserve_pct": 0.05,
+}
+
+TRADING_RULES_V2_AGGRESSIVE = {
+    **TRADING_RULES_V2_DEFAULT,
+    "risk_pct_per_trade": 0.02,         # position-sizer "1% 기본, 예외적 사유 없인 2% 초과 금지" 상한을 그대로 상한값으로 채용
+    "atr_multiplier": 2.5,
+    "contraction_lookback": 10,          # ATR 수축 비교 구간(최근 10일 vs 이전 10일)
+    "contraction_ratio_max": 0.85,       # 최근 ATR ≤ 이전 ATR × 0.85 → 수축으로 판정 (vcp-screener contraction_ratio 기본 0.70보다 완화 — 종목 수가 훨씬 적은 이 프로젝트 유니버스에서 과도하게 좁히면 후보가 0이 될 위험)
+    "pivot_proximity_pct": 0.05,         # 최근 60일 고점 대비 -5% 이내
+    "max_position_pct": 0.25,
+    "max_holdings": 15,
+    "max_daily_trades": 8,
+    "min_cash_reserve_pct": 0.03,
+}
+
+TRADING_RULES_V2_MOMENTUM = {
+    **TRADING_RULES_V2_DEFAULT,
+    "risk_pct_per_trade": 0.01,          # 초안은 1.5%였으나 11.7 백테스트 실측 결과 MDD가
+                                          # 과도해(-40.5%) 1.0%로 낮춤 — 근거는 11.7 참고
+    "atr_multiplier": 1.5,               # 버스트 추종은 손절을 타이트하게 (stockbee 스타일 — 빠른 손절)
+    "take_profit_atr_multiplier": 2.0,   # 짧게 먹고 나간다
+    "burst_threshold": 0.04,             # stockbee "4% breakout" 원안 그대로 — 11.7에서 KR/US/코인
+                                          # 유니버스로 백테스트해 과도하게 안 걸리는지 검증 필요
+    "volume_ratio_min": 1.0,             # 거래량이 전일 이상
+    "close_location_min": 0.6,           # (종가-저가)/(고가-저가) ≥ 0.6 — 고가 근처 마감
+}
+```
+
+**포지션 수량 계산(v1 `_calc_quantity`를 대체하는 v2 전용 함수)**:
+
+```python
+risk_dollars = total_equity * rules["risk_pct_per_trade"]
+stop_distance = atr14 * rules["atr_multiplier"]
+quantity = risk_dollars / stop_distance    # 코인은 소수 8자리 반올림, 그 외는 정수 내림 — v1 _calc_quantity와 동일한 시장별 분기
+target_amount = quantity * price
+# 이후 max_position_pct 상한은 apply_risk_guardrail()이 그대로 재검증(변경 없음)
+```
+
+**의도적으로 스코프에서 뺀 것**:
+- **Kelly Criterion 사이징**: `position-sizer`가 지원하지만 봇별 실측 승률/손익비가 최소
+  30건 이상 쌓여야 의미 있다(`backtest-expert`의 표본 크기 원칙과 동일한 이유) — v2
+  런칭 시점엔 데이터가 0건이므로 대상에서 제외하고, 향후 확장(11.12)으로 남긴다.
+- **포트폴리오 히트 한도**(전체 미결제 리스크 ≤ 자산의 6~8%, `position-sizer` 원칙):
+  `max_holdings × risk_pct_per_trade`가 이미 사실상 이 한도를 근사하므로(예: 기본형
+  10종목 × 1% = 최대 10% 리스크) 별도 가드레일 필드를 새로 만들지 않는다 — 필요성이
+  실측으로 확인되면 추가.
+- 가중합 스코어링(0~100점) 대신 v1과 동일하게 **순차 임계값 필터**를 유지한다 — 경계값
+  단위테스트가 쉽고(CLAUDE.md 테스트 규칙), 기존 `decide_trades*()` 코드 스타일과
+  일관된다.
+
+### 11.4 청산(매도) 조건 — ATR 기반으로 교체, 구조는 v1과 동일
+
+세 봇 모두 v1과 같은 "순서대로 확인, 하나라도 맞으면 즉시 전량 매도" 구조를 유지하되,
+손절·익절 기준이 고정 %가 아니라 ATR 배수다:
+
+1. 손절: 현재가 ≤ 평단가 − `atr_multiplier` × 진입 시점 ATR14
+2. 익절: 현재가 ≥ 평단가 + `take_profit_atr_multiplier` × 진입 시점 ATR14
+3. 신호 소멸: 예측 5일 수익률 음전환 (v1과 동일)
+4. RSI 과매수 청산 (v1과 동일)
+5. **(모멘텀만) 추세 이탈**: 종가가 진입 후 최근 5일 저점 하회 — burst 전략은 짧은
+   보유기간을 전제하므로 v1 모멘텀의 "SMA20 이탈"보다 더 촘촘한 윈도우를 쓴다
+
+**진입 시점 ATR을 어디에 저장하나**: `holdings.csv` 스키마(`code, name, quantity,
+avg_price`)에 컬럼을 추가하면 v1과 동일한 마이그레이션 리스크가 생긴다(8단계에서
+`market` 컬럼을 일부러 안 넣은 것과 같은 이유). 대신 **매도 판단 시점에 그 종목의
+"현재" ATR14를 다시 계산해서 쓴다**(진입 시점 값을 저장하지 않음) — 손절폭이 시간에 따라
+조금씩 움직이지만, 코드 변경 없이 v1의 CSV 스키마를 그대로 재사용할 수 있는 실용적
+절충이다. 이 근사가 실제로 문제가 되는지는 11.7 백테스트에서 확인한다.
+
+### 11.5 실행 파이프라인 통합 (`run_daily_trading.py`)
+
+**신호 계산은 공유하되, 판단·체결·원장 반영은 v1과 완전히 독립적으로 분리한다** — v1의
+`run()`이 이미 "봇마다 원장이 분리돼 있고 한 봇의 예외가 다른 봇을 막지 않는다"는 원칙으로
+짜여 있으므로, v2 봇들도 같은 원칙의 연장으로 추가한다:
+
+```
+run()
+ ├─ (기존, 변경 없음) 국내/해외/코인 스냅샷 조회, 워치리스트 산출
+ ├─ (기존, 변경 없음) _build_signal() 순회 → signals 생성
+ │     └─ (신규) 여기서 atr14/atr_contraction_ratio/dist_from_high_pct/
+ │              volume_ratio_1d/range_ratio_3d/close_location 필드도 함께 계산
+ ├─ (기존, 변경 없음) for bot_id in pending v1 bots: _run_bot(...)   ← v1 3개 봇
+ └─ (신규) for bot_id in pending v2 bots: _run_bot_v2(...)          ← v2 3개 봇
+```
+
+`signals`(예측·RSI·뉴스감성·ATR 등 전부)는 v1·v2가 **같은 리스트를 그대로 공유**한다 —
+predictor 학습·뉴스 조회가 이 파이프라인에서 가장 비싼 부분인데, v2를 위해 이를 다시
+돌리면 GitHub Actions 실행 시간과 네이버 뉴스 요청 수가 거의 두 배가 된다. `_run_bot_v2()`는
+`_run_bot()`과 거의 동일한 구조(판단→가드레일→체결→시가평가→원장반영)이되
+`trading_agent_v2.BOT_STRATEGIES_V2`와 `config.portfolio_dir_for_v2()`를 쓴다는 점만
+다르다 — 코드 중복이 걱정되면 `_run_bot()`을 `strategies_registry`/`portfolio_dir_fn`
+파라미터를 받도록 일반화하는 것도 고려할 수 있지만, **v1 라이브 코드 경로를 절대 건드리지
+않는다는 원칙**을 우선해 이번엔 별도 함수로 복사해서 시작하고, 안정화된 뒤(11.11의 며칠
+관찰 단계 이후) 리팩터링 여부를 재검토하는 것을 권장한다.
+
+**실패 격리**: 국내(KRX) 스냅샷 실패 시 전체 중단은 v1과 동일하게 유지(기존 동작
+변경 없음). v2 봇 하나의 예외가 v1 봇이나 다른 v2 봇을 막지 않도록 v1과 동일하게
+봇 단위 `try/except`로 감싼다.
+
+### 11.6 UI — "모의투자(ver2)" 탭
+
+```python
+# demo_app.py (변경 후)
+pg = st.navigation([
+    st.Page("pages/모니터링.py", title="모니터링", icon="🖥️"),
+    st.Page("pages/모의투자.py", title="모의투자", icon="💰"),
+    st.Page("pages/모의투자_v2.py", title="모의투자(ver2)", icon="💰"),  # 신규
+])
+```
+
+`pages/모의투자_v2.py`는 `pages/모의투자.py`와 거의 동일한 골격이다(11.2의
+`src/portfolio_ui.py` 공유로 실제 코드는 중복 없음):
+
+- 상단 면책 문구는 v1과 동일 문구를 유지하되, "이 화면은 tradermonty Claude 스킬(포지션
+  사이징·기술적 분석·모멘텀 스크리닝) 방법론을 결정론적으로 포팅한 두 번째 실험용
+  매매 로직입니다. v1(모의투자 탭)과는 완전히 분리된 별도 계좌(1억원)이며 자금 이동이
+  없습니다"라는 캡션을 추가로 노출 — 방문자가 두 탭을 서로 다른 실전략 비교로
+  오인하지 않게 한다.
+- `BOT_STRATEGIES_V2`를 순회해 봇 탭 3개 + "성과 비교" 탭 1개 (v1과 동일 구성)
+- 원한다면 "v1 vs v2 기본형" 같은 교차 비교는 이번 스코프에서 제외(성과 비교 탭은 같은
+  버전 안의 봇끼리만 비교) — 필요성이 확인되면 11.12 향후 확장으로
+
+### 11.7 0단계 — 결정론적 백테스트 검증 (`backtest-expert` 방법론 적용)
+
+v1의 "0단계는 코딩이 아니라 실측"이라는 원칙을 v2에도 그대로 적용한다. `backtest-expert`
+스킬 문서가 강조하는 원칙 중 이 프로젝트에 적용 가능한 것만 추린다(FMP 기반 스크립트는
+쓰지 않고, 이 프로젝트의 `data_loader`/`crypto_loader`/`us_screener` 과거 데이터로
+자체 백테스트를 새로 짠다):
+
+- **최소 표본**: 전략당 최소 30건의 신호(가급적 100건 이상) 없이는 결과를 신뢰하지 않는다
+- **파라미터 민감도**: `burst_threshold`(3%/4%/5%), `atr_multiplier`(1.5x/2.0x/2.5x/3.0x)를
+  베이스라인 대비 ±로 흔들어보고, 특정 값 하나에서만 잘 되는 "뾰족한 봉우리"가 아니라
+  "완만한 고원"을 찾는다 — 뾰족하면 과최적화 신호
+- **워크포워드**: 과거 구간을 훈련/검증으로 나눠, 검증 구간 성과가 훈련 구간의 절반
+  미만으로 떨어지면 경고
+- **비관적 가정**: 이 프로젝트는 이미 "그날 종가 체결"이라는 단순화를 쓰고 있으므로
+  (5.3), 슬리피지를 추가로 얹어 보수적으로 본다
+
+신규 스크립트 `scripts/backtest_v2_strategies.py`(로컬 전용, git 커밋 원장에 영향 없음)를
+만들어 워치리스트 상위 종목들의 과거 1~2년 데이터로 세 봇의 신규 로직을 시뮬레이션하고,
+`backtest-expert`의 5개 평가축(표본크기·기댓값·리스크관리·강건성·실행현실성)을 사람이
+직접 채점해 Deploy/Refine/Abandon을 판단한다 — `backtest-expert`의 `evaluate_backtest.py`
+스크립트 자체는 이 프로젝트 데이터 형식과 안 맞아 그대로 안 쓰고, 평가 축·체크리스트만
+참고해 판단 기준으로 삼는다.
+
+**실측 결과 (2026-08-23, `scripts/backtest_v2_strategies.py` 최초 실행) — 완료.** 국내
+20+해외 15+코인 15 = 유니버스 50종목(유효 히스토리 확보 47종목) × 과거 2년 데이터로
+검증했다.
+
+- **실행 중 실제 버그 하나 발견·수정**: 종목 히스토리의 **마지막 날**에 진입 신호가
+  뜨면 `_simulate_trade()`가 `last_idx == entry_idx`가 되어 `days_held=0`인 트레이드를
+  반환했고, 호출부(`_run_bot_backtest`)의 커서가 전혀 전진하지 못해 같은 지점에서 동일한
+  트레이드를 무한히 반복 생성했다 — 실측으로 프로세스 메모리 2GB대까지 폭주하며 응답
+  없음 상태가 됐다(사용자가 이상 징후를 감지해 알려줘서 발견). `_simulate_trade()`가
+  이 경우 `None`을 반환하도록 막고, 호출부도 `i += max(days_held, 1)`로 이중 방어선을
+  둬서 고쳤다. 합성 데이터로 이 정확한 엣지케이스(마지막 날 진입 강제 유도)를 재현하는
+  회귀 시나리오로 재발 안 함을 확인.
+- **평가 방법론 자체의 오류도 하나 발견·수정**: 최초 실행에서 세 봇 모두 MDD가
+  -97~99%로 나와 의심스러웠다 — 원인은 트레이드를 이어붙여 복리 계산할 때 매번 계좌
+  전체(100%)를 거는 것처럼 계산했기 때문이었다. 실제로는 `position-sizer`식으로 거래당
+  `risk_pct_per_trade`(1~2%)만 걸므로, 가격 등락률(`return_pct`)이 아니라 "손절에 정확히
+  맞으면 -risk_pct_per_trade가 되도록" 정규화한 `equity_impact_pct`로 다시 계산하도록
+  스크립트를 고쳤다(합성 데이터로 손절/익절 각각 예상한 정규화 값 근방이 나오는지
+  검증). 이 교정 없이 나온 첫 실행 결과는 폐기 — 아래 수치는 교정 후 값이다.
+- **판정 결과**:
+
+  | 봇 | 표본 | 기대값(건당, 계좌기준) | MDD(근사) | 판정 |
+  |---|---|---|---|---|
+  | 기본형 | 780건 | +0.19% | -21.0% | ✅ Deploy |
+  | 공격적 | 65건 | +0.98% | -15.7% | ✅ Deploy |
+  | 모멘텀(risk 1.5%, 초안) | 872건 | +0.24% | **-40.5%** | 🔄 Refine (MDD 과도) |
+  | 모멘텀(risk 1.0%로 조정) | 872건 | +0.16% | -29.1% | ✅ Deploy |
+
+  모멘텀 봇은 `atr_multiplier`를 1.5~3.0 사이로 넓혀도 MDD가 -40.5%→-36.8% 수준까지만
+  줄어들어 손절폭이 원인이 아니었다 — 진짜 원인은 진입 조건이 자주 걸려(트레이드
+  872건, 세 봇 중 최다) 승률 50%대가 반복될 때 연속 손실 구간이 길어지는 것이었다.
+  `risk_pct_per_trade`는 `equity_impact_pct` 계산식에 선형으로 들어가므로(같은 트레이드
+  집합에 대해 배율만 바뀜) 0.5%~1.5% 사이로 다시 스윕해 MDD가 선형에 가깝게
+  줄어드는 것을 확인했고, **1.0%가 -30% 문턱을 막 통과하는 지점**이라 이 값으로
+  확정했다(11.3·11.8에 반영 완료). 모멘텀 봇의 "공격성"은 이제 리스크%가 아니라
+  좁은 손절(`atr_multiplier=1.5`)·빠른 회전(짧은 보유기간)에서 나온다.
+- **파라미터 민감도(backtest-expert "고원 vs 봉우리")**: 기본형 `atr_multiplier`
+  1.5~3.0, 공격적 `atr_multiplier` 1.5~3.0, 모멘텀 `burst_threshold` 3~5% 모두 기대값이
+  완만하게 변하는 고원 형태였다(특정 값 하나에서만 잘 되는 뾰족한 봉우리 없음) — 과최적화
+  신호는 없었다.
+- **스코프 한계 재확인**: 이 검증은 `predicted_return_5d`/`directional_accuracy`/
+  `news_sentiment` 필터를 뺀 채로(11.7 서두에 명시한 스코프) 진행했으므로, 실제 운영
+  시엔 이 필터들이 후보를 더 추려내 트레이드 빈도는 줄고(872건보다 적을 가능성) 품질은
+  달라질 수 있다 — 위 수치를 "이대로 실전에서도 재현된다"가 아니라 "v2 고유 메커니즘
+  자체가 무너지지 않았다"는 근거로 읽는다.
+
+### 11.8 리스크 관리 정책 요약표 (v1 6장과 대응)
+
+| 규칙 | 기본형 | 공격적 | 모멘텀 |
+|---|---|---|---|
+| 거래당 리스크(계좌 대비) | 1% | 2% | 1%(11.7 백테스트로 1.5%→1.0% 하향 조정) |
+| 손절 ATR 배수 | 2.0x | 2.5x | 1.5x |
+| 익절 ATR 배수 | 3.0x | (피라미딩이라 개별 익절 대신 종목당 비중 상한이 사실상의 상한 역할) | 2.0x |
+| 종목당 최대 비중 | 15% | 25% | 15%(기본형과 동일) |
+| 동시 보유 종목 수 | 10 | 15 | 10 |
+| 1회 매매당 최소 금액 | 100만원 | 100만원 | 100만원 |
+| 하루 최대 거래 횟수 | 5 | 8 | 5 |
+| 현금 최소 보유 비율 | 5% | 3% | 5% |
+
+하단 4개 행은 `apply_risk_guardrail()`을 그대로 재사용하기 위해 **v1과 완전히 같은 키·같은
+값**을 쓴다(11.3 코드 블록 참고) — v1이 이미 검증한 가드레일 로직을 v2도 그대로
+신뢰한다.
+
+### 11.9 면책 조항
+
+v1의 7장 면책 문구를 그대로 상속한다. 추가로:
+- v2는 **아직 실전 검증 이력이 없는 신규 로직**이므로, v1보다 더 실험적이라는 점을
+  UI(11.6)와 이 문서 양쪽에 명시한다.
+- "tradermonty 스킬을 참고했다"는 것이 그 스킬의 신뢰성이나 백테스트 검증을 보증하지
+  않는다 — 이 프로젝트가 독자적으로 11.7의 자체 백테스트를 거쳐야 배포한다.
+
+### 11.10 테스트 계획
+
+- `tests/test_trading_agent_v2.py`(신규): v1의 `test_trading_agent.py`와 동일한 스타일 —
+  합성 신호로 ATR 기반 손절/익절 경계값, MA 정렬 필터, 변동성 수축 판정, 4% 브레이크아웃
+  트리거를 정확한 경계(임계값 바로 위/아래)에서 단위테스트. 외부 API 없음(v1과 동일한
+  이유로 모킹 불필요).
+- `tests/test_indicators.py`: `atr()` 함수 회귀테스트(합성 OHLCV로 알려진 True Range 값과
+  대조) 추가.
+- `tests/test_portfolio.py`: `portfolio_dir_for_v2()` 원장 격리 테스트 추가(v1 원장과
+  섞이지 않는지 — 8단계 때 추가한 다중 원장 격리 테스트 패턴 재사용).
+- `--dry-run` 스모크: `run_daily_trading.py --dry-run`을 워치리스트 축소본으로 돌려 v1
+  3봇 + v2 3봇 총 6봇이 모두 예외 없이 판단을 내리는지 확인, v1 쪽 출력이 이번 변경
+  전후로 **완전히 동일한지**(회귀 없음) diff로 대조.
+- `streamlit.testing.v1.AppTest`로 `pages/모의투자_v2.py` 렌더링(초기 상태 + 합성 원장
+  상태) 확인, 이어서 `streamlit run demo_app.py` 실제 기동 후 "모의투자(ver2)" 탭 확인.
+
+### 11.11 구현 단계 제안
+
+0. ~~**0단계 (실측/검증)**: `src/indicators.py`에 `atr()` 추가 + 11.7의 백테스트 스크립트로
+   세 봇 초안 규칙(11.3의 수치)을 과거 데이터에 검증, Deploy/Refine/Abandon 판정 후 필요시
+   수치 조정.~~ **완료 (2026-08-23)**. `atr()` 회귀테스트 3개 통과(오프라인 전체 179개
+   회귀 없음), `scripts/backtest_v2_strategies.py` 작성·실행 중 무한루프 버그와 MDD 계산
+   방법론 오류를 각각 발견·수정(근거는 11.7 "실측 결과"). 최종 판정: 기본형·공격적은
+   초안 그대로 ✅ Deploy, 모멘텀은 `risk_pct_per_trade`를 1.5%→1.0%로 낮춰 ✅ Deploy —
+   11.3·11.8의 수치는 이미 이 결과를 반영해 갱신했다. 이제 1단계로 진행 가능.
+1. ~~`src/trading_agent_v2.py` — `decide_trades_v2_*()` 3종 + `TRADING_RULES_V2_*` +
+   `BOT_STRATEGIES_V2`. 경계값 단위테스트 포함.~~ **완료 (2026-08-23)**. `_calc_quantity_v2`
+   ·기본형(MA정렬·ATR손절익절)·공격적(변동성수축·피라미딩·take_profit 없음)·모멘텀(4%
+   버스트·거래량/레인지확장·종가위치·5일저점이탈) 경계값 32개 테스트 통과. v1
+   `trading_agent.py`는 한 글자도 안 건드림(`TradeAction`/`infer_market`/
+   `apply_risk_guardrail`만 import). `decide_trades_v2_*` → `apply_risk_guardrail()`
+   연계도 수동 스모크로 확인(저변동성 종목은 종목당비중초과로 거부, 정상변동성은 승인).
+2. ~~`config.portfolio_dir_for_v2()`, `run_daily_trading.py`의 `_build_signal()` 필드 확장 +
+   `_run_bot_v2()`/v2 봇 루프 추가. `--dry-run`으로 v1 출력 회귀 없음 확인.~~ **완료
+   (2026-08-23)**. `_build_signal()`이 신규 네트워크 호출 없이 같은 price_df에서 v2
+   필드(atr14/sma20/sma60/atr_contraction_ratio/dist_from_60d_high/day_change/
+   volume_ratio_1d/day_range/prev_range_max3/close_location/low5)까지 계산해 v1·v2가
+   신호 하나를 공유하도록 확장. `.gitignore`의 `!data/portfolio/**/*.csv` 재귀 규칙이
+   `data/portfolio/v2/`도 실제로 커버하는지 `git check-ignore -v`/`git add --dry-run`으로
+   먼저 확인(8단계 때 걸렸던 함정 재발 방지 차원). 워치리스트를 8종목으로 줄인 실제
+   `--dry-run` 통합 테스트로 **v1 3봇 + v2 3봇 총 6봇 전체가 예외 없이 판단**하는 것을
+   확인 — v1 세 봇은 기존 로직 그대로(기본형 손절매도 4건, 공격적 매수 4건, 모멘텀은
+   가드레일이 코인 과대비중 요청을 정상 거부) 동작해 v2 통합이 v1을 회귀시키지 않았음을
+   실측 확인, v2 기본형은 실제로 MA정렬+ATR사이징 매수 판단을 냄(공격적·모멘텀은 이
+   축소 유니버스에서 조건에 맞는 후보가 없어 관망 — 정상). `config.portfolio_dir_for_v2()`
+   격리 테스트 2개 추가(`tests/test_portfolio.py`). 전체 오프라인 테스트 213개 통과.
+3. ~~`src/portfolio_ui.py` 리팩터(11.2) — 먼저 `pages/모의투자.py`가 이 모듈을 쓰도록
+   바꾸고 **v1 페이지가 리팩터 전후로 픽셀 단위까지 동일하게 렌더링되는지** AppTest로
+   확인(순수 이동이므로 로직 변경이 없어야 함).~~ **완료 (2026-08-23)**. `_change_html`
+   부터 `_render_comparison`까지 헬퍼·렌더 함수 488줄과 title/warning/caption 문구를
+   `src/portfolio_ui.py`의 `render_page(bot_strategies, portfolio_dir_fn, *, title,
+   extra_caption=None)`로 옮기면서, 원본과 새 위치를 `diff`로 대조해 **글자 하나까지
+   동일함을 실측 확인**(리뷰가 아니라 diff 자체로 증명). `pages/모의투자.py`는 `render_page
+   (BOT_STRATEGIES, config.portfolio_dir_for, title="💰 모의투자")` 한 줄 호출로 축소.
+   `extra_caption` 파라미터는 v2 페이지가 4단계에서 실험적 버전 안내 문구를 추가할 때 쓴다.
+   AppTest로 (a) 실제 라이브 원장(보유종목·거래내역 있음)과 (b) 완전히 빈 원장(첫 실행 전,
+   "아직 없음" 분기) 두 상태 모두 예외 없이 렌더링되는 것을 확인, `streamlit run
+   demo_app.py`를 8502 포트로 띄워 서버가 에러 없이 기동하는 것도 확인했다(Chrome 브라우저
+   도구가 이번 세션에도 비활성화돼 있어 v1의 10장 4단계와 동일하게 AppTest 엘리먼트 트리
+   검사로 스크린샷 확인을 대체). 전체 오프라인 테스트 213개 유지(회귀 없음), ruff 통과.
+4. ~~`pages/모의투자_v2.py` + `demo_app.py` 1줄 추가. AppTest → `streamlit run demo_app.py`
+   실제 확인.~~ **완료 (2026-08-23)**. `pages/모의투자_v2.py`는 `render_page(
+   BOT_STRATEGIES_V2, config.portfolio_dir_for_v2, title="💰 모의투자 (ver2)",
+   extra_caption=...)` 한 번 호출로 구성 — `extra_caption`은 "v2는 tradermonty 스킬 방법론을
+   결정론적으로 포팅한 실험용 로직이며 v1과 자금이 분리돼 있고 아직 실전 검증 이력이
+   없다"는 안내를 표준 면책 캡션 뒤에 덧붙인다. `demo_app.py`에 `st.Page("pages/
+   모의투자_v2.py", title="모의투자(ver2)", icon="💰")` 한 줄 추가. AppTest로 (a) 빈 원장,
+   (b) 합성 매수 1건+자산추이 2일치를 실제로 `portfolio.apply_trade`/`save_daily_result`로
+   기록해 만든 populated 상태(테스트 후 삭제 — 실제 원장 아님) 둘 다 예외 없이 렌더링
+   확인, `streamlit run demo_app.py`(8502 포트) 실제 기동 확인. 전체 오프라인 테스트
+   213개 유지, ruff 통과.
+5. 2단계에서 로컬 `--dry-run` 통합 스모크(6봇 전체)는 이미 확인 완료 — 남은 건 실제
+   GitHub Actions 워크플로에서도(이미 있는 workflow 그대로) 정상 커밋되는지 하루 관찰.
+6. 며칠 관찰 (v1의 10장 6단계와 동일한 이유) — v2 원장이 실제로 쌓이는지, 성과가 v1과
+   구조적으로 다르게 나오는지(같은 신호에서 같은 판단만 반복한다면 포팅이 무의미했다는
+   신호).
+
+### 11.12 향후 확장 (v2 이후)
+
+- **Kelly Criterion 사이징**: 각 v2 봇의 실거래가 30건 이상 쌓이면 `position-sizer`의
+  Half-Kelly 공식으로 `risk_pct_per_trade`를 정적 값 대신 승률/손익비 기반 동적 값으로
+  전환 검토.
+- **포트폴리오 히트 한도**: 전체 미결제 리스크가 실측으로 6~8%를 자주 넘는 것이 확인되면
+  `apply_risk_guardrail()`에 v2 전용 히트 체크를 추가.
+- **VCP 변동성 수축 판정 고도화**: 지금은 ATR 비율로 근사하지만, `vcp-screener`가 쓰는
+  T1/T2/T3 단계별 되돌림 폭 비교 같은 더 정교한 판정은 이 프로젝트 데이터로 재현
+  가능한지 추가 조사 필요.
+- **v1 vs v2 교차 비교 UI**: 같은 "기본형"이라는 이름의 v1/v2 성과를 나란히 비교하는
+  화면(11.6에서 이번 스코프 제외로 결정한 것의 재검토).

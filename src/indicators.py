@@ -46,6 +46,25 @@ def rsi(s: pd.Series, window: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """Average True Range — 가격 단위 변동성. df는 High/Low/Close 컬럼이 필요하다.
+
+    True Range = max(고가-저가, |고가-전일종가|, |저가-전일종가|). RSI와 동일한 Wilder
+    평활(alpha=1/window EMA)을 쓴다 — 표준 ATR 정의. 모의투자 v2(PRD.md 11장)의 손절폭·
+    포지션 사이징 기준으로 쓴다.
+    """
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat(
+        [
+            df["High"] - df["Low"],
+            (df["High"] - prev_close).abs(),
+            (df["Low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / window, adjust=False).mean()
+
+
 def bollinger(s: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     """볼린저 밴드. %B는 밴드 내 위치(0=하단, 1=상단)."""
     mid = sma(s, window)
