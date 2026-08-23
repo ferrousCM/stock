@@ -1,1 +1,2 @@
 date,code,name,action,quantity,price,amount,reason
+2026-08-23,002990,금호건설,buy,214,14750,3156500,"MA 정렬(종가>SMA20>SMA60), 예측 5일 수익률 -7.6%, 방향적중률 58% — ATR14 리스크 1% 사이징 매수"
