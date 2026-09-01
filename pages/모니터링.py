@@ -248,7 +248,11 @@ elif is_us:
 left_col, right_col = st.columns([3, 7], gap="medium")
 
 _TOP_ROW_HEIGHT = 800
-_BOTTOM_ROW_HEIGHT = 380
+_BOTTOM_ROW_HEIGHT = 760  # 가격예측·뉴스&공시 박스 세로 (기존 380의 2배)
+# 뉴스 탭 스크롤 박스 / 공시 탭 표의 세로 높이 — _BOTTOM_ROW_HEIGHT가 2배로 커진 만큼
+# 안쪽 내용 박스도 최대한 키운다. 박스 상단의 탭바·표시개수 선택줄·여백을 뺀 값(대략치라
+# 브라우저로 보며 미세조정 필요할 수 있음).
+_NEWS_INNER_HEIGHT = 620
 # 스크리닝 테이블 높이 상한 — _TOP_ROW_HEIGHT(800)는 우측 "종목 상세" 박스와 시작줄을
 # 맞추려고 고정한 값이라, 좌측 "주가 요약"에는 필터·탭 등을 빼면 여유 공간이 남는다.
 # 예전엔 260으로 낮게 고정해뒀더니 기본 표시개수(30개)에서도 테이블 아래로 빈 여백이
@@ -893,6 +897,11 @@ def _apply_horizon_preset() -> None:
 with left_col:
     _section_title("💹 가격 예측")
     with st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGHT):
+        # 이 박스 안 세로 요소 간격(행간)만 전역 0.45rem → 약 1.3배로 넓힌다.
+        st.markdown(
+            "<style>.st-key-predict div[data-testid='stVerticalBlock']{gap:0.6rem;}</style>",
+            unsafe_allow_html=True,
+        )
         st.caption("⚠️ 참고용 추정치이며 투자 조언이 아닙니다. 과거 시세 흐름을 바탕으로 자동 계산한 값입니다.")
 
         try:
@@ -1065,7 +1074,7 @@ with right_col:
             if news_df.empty:
                 st.info("최근 뉴스를 찾지 못했습니다.")
             else:
-                with st.container(height=260):
+                with st.container(height=_NEWS_INNER_HEIGHT):
                     for _, row in news_df.iterrows():
                         with st.container(border=True):
                             left, right = st.columns([6, 1])
@@ -1117,6 +1126,6 @@ with right_col:
                         ),
                         column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
                         hide_index=True,
-                        height=260,
+                        height=_NEWS_INNER_HEIGHT,
                         width="stretch",
                     )
