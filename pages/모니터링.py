@@ -18,6 +18,7 @@ crypto_loader — 해외증시는 data_loader.find_symbol(market="NASDAQ")로 �
 from __future__ import annotations
 
 import html
+import math
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -197,6 +198,23 @@ def _crypto_news(keyword: str, n: int) -> pd.DataFrame:
     return crypto_news.fetch_news_with_sentiment(keyword, n=n)
 
 
+# 뉴스 탭 페이지네이션용 — 목록(가벼움)과 감성 enrich(무거움)를 분리해 캐시한다.
+# 목록은 종목당 한 번만 받고, 감성은 화면에 보이는 페이지에 대해서만 채운다.
+@st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="뉴스 목록 불러오는 중...")
+def _news_list(code: str, total: int) -> pd.DataFrame:
+    return news.fetch_news_list_n(code, n=total)
+
+
+@st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="뉴스 목록 불러오는 중...")
+def _crypto_news_list(keyword: str, total: int) -> pd.DataFrame:
+    return crypto_news.fetch_news_list(keyword, n=total)
+
+
+@st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="뉴스 감성 분석 중...")
+def _news_enrich(rows: pd.DataFrame) -> pd.DataFrame:
+    return news.enrich_with_sentiment(rows)
+
+
 @st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="공시 불러오는 중...")
 def _dart(code: str) -> tuple[pd.DataFrame, str]:
     """(공시 DataFrame, 상태). 상태: "ok" | "unavailable" | "no_key".
@@ -249,10 +267,12 @@ left_col, right_col = st.columns([3, 7], gap="medium")
 
 _TOP_ROW_HEIGHT = 800
 _BOTTOM_ROW_HEIGHT = 760  # 가격예측·뉴스&공시 박스 세로 (기존 380의 2배)
-# 뉴스 탭 스크롤 박스 / 공시 탭 표의 세로 높이 — _BOTTOM_ROW_HEIGHT가 2배로 커진 만큼
-# 안쪽 내용 박스도 최대한 키운다. 박스 상단의 탭바·표시개수 선택줄·여백을 뺀 값(대략치라
-# 브라우저로 보며 미세조정 필요할 수 있음).
-_NEWS_INNER_HEIGHT = 620
+# 뉴스&공시 박스 내부 크기 — _BOTTOM_ROW_HEIGHT(760)에서 상단 선택줄·하단 페이지색인·
+# 여백을 뺀 값(대략치라 브라우저로 보며 미세조정 필요할 수 있음).
+_NEWS_SCROLL_HEIGHT = 580  # 뉴스 카드 스크롤 영역 (아래 페이지 색인 자리를 남김)
+_DART_TABLE_HEIGHT = 650  # 공시(DART) 표 — 페이지 색인이 없어 더 크게
+_NEWS_FETCH_TOTAL = 100  # 최초에 받아둘 뉴스 목록 개수 (페이지네이션 대상)
+_NEWS_PAGE_SIZE_OPTS = [10, 15, 20]  # 페이지당 표시 개수
 # 스크리닝 테이블 높이 상한 — _TOP_ROW_HEIGHT(800)는 우측 "종목 상세" 박스와 시작줄을
 # 맞추려고 고정한 값이라, 좌측 "주가 요약"에는 필터·탭 등을 빼면 여유 공간이 남는다.
 # 예전엔 260으로 낮게 고정해뒀더니 기본 표시개수(30개)에서도 테이블 아래로 빈 여백이
@@ -1046,35 +1066,80 @@ with left_col:
 with right_col:
     _section_title("📰 뉴스" if (is_crypto or is_us) else "📰 뉴스 & 공시")
     with st.container(key="news", border=True, height=_BOTTOM_ROW_HEIGHT):
-
-        # st.tabs()를 컬럼 안에 넣으면 그 컬럼 너비만큼만 차지해 내용(뉴스 카드)이 좁아진다
-        # (예전엔 표시개수 셀렉트박스를 옆에 두려고 [4,1] 컬럼 안에 tabs를 넣었더니 뉴스
-        # 제목·요약이 실제 배정된 탭 너비보다 훨씬 좁게 잘렸다). 탭은 "뉴스" 박스 전체
-        # 너비로 그리고, 표시개수 선택은 뉴스 탭 내부의 작은 우측 정렬 줄로 옮긴다.
-        tab_labels = ["📰 뉴스"] if (is_crypto or is_us) else ["📰 뉴스", "📋 공시 (DART)"]
-        tabs = st.tabs(tab_labels)
-        news_tab = tabs[0]
-        dart_tab = tabs[1] if len(tabs) > 1 else None
-
-        with news_tab:
-            _hdr_l, hdr_r = st.columns([5, 1])
-            with hdr_r:
-                news_n = st.selectbox(
-                    "표시개수",
-                    [5, 10, 15, 20],
-                    index=1,
-                    key="news_n",
+        # 제목 바로 아래 한 줄: [뉴스 / 공시(DART) 선택] + [페이지당 표시 개수].
+        # 예전엔 st.tabs로 뉴스/공시를 나누고 표시개수를 뉴스 탭 안에 따로 뒀는데,
+        # 페이지 색인(하단)을 넣으면서 세로 공간을 아끼려고 둘을 같은 행으로 합쳤다.
+        has_dart = not (is_crypto or is_us)
+        sel_col, size_col = st.columns([3, 1], vertical_alignment="bottom")
+        with sel_col:
+            view = (
+                st.radio(
+                    "보기",
+                    ["뉴스", "공시 (DART)"],
+                    horizontal=True,
+                    key="news_view",
                     label_visibility="collapsed",
-                    help="뉴스 표시 개수",
                 )
-            news_df = (
-                _crypto_news(selected_name, news_n) if (is_crypto or is_us) else _news(selected_code, news_n)
+                if has_dart
+                else "뉴스"
+            )
+        with size_col:
+            page_size = st.selectbox(
+                "표시개수",
+                _NEWS_PAGE_SIZE_OPTS,
+                index=0,
+                key="news_n",
+                label_visibility="collapsed",
+                help="페이지당 뉴스 개수",
             )
 
-            if news_df.empty:
+        if view == "공시 (DART)":
+            dart_df, dart_status = _dart(selected_code)
+            if dart_status == "no_key":
+                st.info(
+                    "DART_API_KEY가 설정되지 않아 공시를 불러올 수 없습니다. "
+                    "앱 설정 Secrets에 DART_API_KEY를 (섹션 없이 최상위에) 추가하세요."
+                )
+            elif dart_status == "unavailable":
+                st.info(
+                    "DART 서버에 연결하지 못했습니다. 한국 외 지역(예: Streamlit Cloud) "
+                    "배포에서는 opendart.fss.or.kr 접속이 제한될 수 있습니다. "
+                    "잠시 후 다시 시도해 주세요."
+                )
+            elif dart_df.empty:
+                st.info("최근 90일 내 공시가 없습니다.")
+            else:
+                st.dataframe(
+                    dart_df.rename(
+                        columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}
+                    ),
+                    column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
+                    hide_index=True,
+                    height=_DART_TABLE_HEIGHT,
+                    width="stretch",
+                )
+        else:
+            # 목록은 최초에 100개까지 받아두고(가벼움), 감성 분석은 지금 보이는 페이지만 채운다.
+            news_list = (
+                _crypto_news_list(selected_name, _NEWS_FETCH_TOTAL)
+                if (is_crypto or is_us)
+                else _news_list(selected_code, _NEWS_FETCH_TOTAL)
+            )
+            if news_list.empty:
                 st.info("최근 뉴스를 찾지 못했습니다.")
             else:
-                with st.container(height=_NEWS_INNER_HEIGHT):
+                n_items = len(news_list)
+                n_pages = max(1, math.ceil(n_items / page_size))
+                # 종목·페이지당 개수가 바뀌면 키가 달라져 페이지 색인이 1로 초기화된다.
+                pills_key = f"news_page::{selected_code}::{page_size}"
+                prev = st.session_state.get(pills_key)
+                page = prev if prev in range(1, n_pages + 1) else 1
+
+                start = (page - 1) * page_size
+                page_rows = news_list.iloc[start : start + page_size].reset_index(drop=True)
+                news_df = _news_enrich(page_rows)
+
+                with st.container(height=_NEWS_SCROLL_HEIGHT):
                     for _, row in news_df.iterrows():
                         with st.container(border=True):
                             left, right = st.columns([6, 1])
@@ -1103,29 +1168,13 @@ with right_col:
                                     unsafe_allow_html=True,
                                 )
 
-        if dart_tab is not None:
-            with dart_tab:
-                dart_df, dart_status = _dart(selected_code)
-                if dart_status == "no_key":
-                    st.info(
-                        "DART_API_KEY가 설정되지 않아 공시를 불러올 수 없습니다. "
-                        "앱 설정 Secrets에 DART_API_KEY를 (섹션 없이 최상위에) 추가하세요."
-                    )
-                elif dart_status == "unavailable":
-                    st.info(
-                        "DART 서버에 연결하지 못했습니다. 한국 외 지역(예: Streamlit Cloud) "
-                        "배포에서는 opendart.fss.or.kr 접속이 제한될 수 있습니다. "
-                        "잠시 후 다시 시도해 주세요."
-                    )
-                elif dart_df.empty:
-                    st.info("최근 90일 내 공시가 없습니다.")
-                else:
-                    st.dataframe(
-                        dart_df.rename(
-                            columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}
-                        ),
-                        column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
-                        hide_index=True,
-                        height=_NEWS_INNER_HEIGHT,
-                        width="stretch",
+                st.caption(
+                    f"전체 {n_items}건 중 {start + 1}–{start + len(news_df)}번째 · {page}/{n_pages} 페이지"
+                )
+                if n_pages > 1:
+                    st.pills(
+                        "페이지",
+                        options=list(range(1, n_pages + 1)),
+                        key=pills_key,
+                        label_visibility="collapsed",
                     )

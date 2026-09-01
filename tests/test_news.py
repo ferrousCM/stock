@@ -166,6 +166,53 @@ def test_summarize_empty_body():
     assert news.summarize("") == ""
 
 
+# --------------------------------------------- enrich_with_sentiment / fetch_news_list_n (오프라인)
+
+
+def test_enrich_with_sentiment_fills_columns(monkeypatch):
+    monkeypatch.setattr(news, "fetch_article_body", lambda o, a, use_cache=True: "호재가 가득한 본문")
+    monkeypatch.setattr(news.sentiment, "score", lambda text: {"label": "긍정", "score": 2})
+    listing = pd.DataFrame(
+        {
+            "article_id": ["1", "2"],
+            "office_id": ["9", "9"],
+            "title": ["제목1", "제목2"],
+            "press": ["A", "B"],
+            "date": ["", ""],
+            "url": ["u1", "u2"],
+        }
+    )
+    out = news.enrich_with_sentiment(listing)
+    assert list(out["summary"]) == ["호재가 가득한 본문", "호재가 가득한 본문"]
+    assert list(out["sentiment_label"]) == ["긍정", "긍정"]
+    assert list(out["sentiment_score"]) == [2, 2]
+    # 원본은 그대로 (copy 후 채움)
+    assert "summary" not in listing.columns
+
+
+def test_enrich_with_sentiment_passthrough_empty():
+    empty = pd.DataFrame(columns=["article_id", "office_id", "title"])
+    assert news.enrich_with_sentiment(empty).empty
+    assert news.enrich_with_sentiment(None) is None
+
+
+def test_fetch_news_list_n_requests_enough_pages(monkeypatch):
+    seen = {}
+
+    def _fake_list(code, pages=1, use_cache=True):
+        seen["pages"] = pages
+        return pd.DataFrame({"article_id": [str(i) for i in range(pages * 20)]})
+
+    monkeypatch.setattr(news, "fetch_news_list", _fake_list)
+
+    out = news.fetch_news_list_n("005930", n=100)
+    assert seen["pages"] == 5  # 100 / 20
+    assert len(out) == 100
+
+    news.fetch_news_list_n("005930", n=10)
+    assert seen["pages"] == 1
+
+
 # ----------------------------------------------------------- news (네트워크)
 
 

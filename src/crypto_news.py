@@ -31,7 +31,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from . import news, sentiment
+from . import news
 from .cache_utils import cache_path, is_fresh
 from .config import NEWS_CACHE_TTL_SEC
 
@@ -133,19 +133,4 @@ def fetch_news_with_sentiment(keyword: str, n: int = 10, use_cache: bool = True)
     news.py의 함수를 그대로 쓴다(원문이 결국 n.news.naver.com이라 완전히 동일하게 동작).
     """
     listing = fetch_news_list(keyword, n=n, use_cache=use_cache)
-    if listing.empty:
-        return listing
-
-    summaries, labels, scores = [], [], []
-    for _, row in listing.iterrows():
-        body = news.fetch_article_body(row["office_id"], row["article_id"], use_cache=use_cache)
-        summaries.append(news.summarize(body))
-        result = sentiment.score(f"{row['title']} {body}")
-        labels.append(result["label"])
-        scores.append(result["score"])
-
-    listing = listing.copy()
-    listing["summary"] = summaries
-    listing["sentiment_label"] = labels
-    listing["sentiment_score"] = scores
-    return listing
+    return news.enrich_with_sentiment(listing, use_cache=use_cache)

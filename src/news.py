@@ -25,6 +25,7 @@ _SENTIMENT_LOG_DIR = RAW_DIR / "news_sentiment"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 _LIST_URL = "https://finance.naver.com/item/news_news.naver"
 _ARTICLE_URL = "https://n.news.naver.com/mnews/article/{office_id}/{article_id}"
+_ITEMS_PER_LIST_PAGE = 20  # 네이버 금융 뉴스 목록 페이지당 기사 수(실측 기준 근사)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?다요음]\s)|(?<=[.!?다요음]$)")
 
@@ -108,15 +109,28 @@ def summarize(body: str, max_sentences: int = 2, max_chars: int = 200) -> str:
     return summary
 
 
-def fetch_news_with_sentiment(code: str, n: int = 10, use_cache: bool = True) -> pd.DataFrame:
-    """뉴스 목록 + 본문 요약 + 상승지표(긍정/중립/부정)까지 채운 DataFrame.
+def fetch_news_list_n(code: str, n: int = 100, use_cache: bool = True) -> pd.DataFrame:
+    """최근 뉴스 목록을 최대 n개까지. 네이버 목록은 페이지당 ~20개라 필요한 만큼 페이지를 넘긴다.
 
-    본문을 기사 수만큼 개별 요청하므로 캐시가 없으면 n개에 비례해 느려진다.
+    요청 수는 (n / 20)개로 고정 — 기사 본문은 받지 않으므로 n이 커도 가볍다
+    (본문·감성은 화면에 실제로 보여줄 페이지에 대해서만 enrich_with_sentiment로 채운다).
     """
-    listing = fetch_news_list(code, use_cache=use_cache).head(n).copy()
-    if listing.empty:
+    pages = max(1, math.ceil(n / _ITEMS_PER_LIST_PAGE))
+    return fetch_news_list(code, pages=pages, use_cache=use_cache).head(n).reset_index(drop=True)
+
+
+def enrich_with_sentiment(listing: pd.DataFrame, use_cache: bool = True) -> pd.DataFrame:
+    """뉴스 목록 DataFrame에 summary/sentiment_label/sentiment_score 컬럼을 채운다.
+
+    주식(news.py)·코인(crypto_news.py) 공용 — 원문이 결국 전부 n.news.naver.com이라
+    본문 조회·요약·감성 판정이 동일하다. 본문을 행 수만큼 개별 요청하므로 넘기는 목록이
+    크면 느리다(기사 본문은 24시간 캐시라 한 번 채우면 이후는 빠르다).
+    빈/None DataFrame이면 그대로 돌려준다.
+    """
+    if listing is None or listing.empty:
         return listing
 
+    listing = listing.copy()
     summaries, labels, scores = [], [], []
     for _, row in listing.iterrows():
         body = fetch_article_body(row["office_id"], row["article_id"], use_cache=use_cache)
@@ -129,6 +143,15 @@ def fetch_news_with_sentiment(code: str, n: int = 10, use_cache: bool = True) ->
     listing["sentiment_label"] = labels
     listing["sentiment_score"] = scores
     return listing
+
+
+def fetch_news_with_sentiment(code: str, n: int = 10, use_cache: bool = True) -> pd.DataFrame:
+    """뉴스 목록 + 본문 요약 + 상승지표(긍정/중립/부정)까지 채운 DataFrame.
+
+    본문을 기사 수만큼 개별 요청하므로 캐시가 없으면 n개에 비례해 느려진다.
+    """
+    listing = fetch_news_list(code, use_cache=use_cache).head(n).copy()
+    return enrich_with_sentiment(listing, use_cache=use_cache)
 
 
 def _sentiment_log_path(code: str) -> Path:
