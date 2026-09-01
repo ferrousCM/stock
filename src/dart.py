@@ -1,12 +1,14 @@
 """DART(전자공시시스템) OpenAPI 연동 — 종목별 공식 공시 목록.
 
 무료 API지만 사용하려면 https://opendart.fss.or.kr 에서 본인이 직접 키를
-발급받아야 한다. 프로젝트 루트에 `.env` 파일을 만들어
+발급받아야 한다. 키는 두 경로 중 하나로 넣는다:
 
-    DART_API_KEY=발급받은키
+  - 로컬: 프로젝트 루트 `.env` 파일에 `DART_API_KEY=발급받은키` (.env는 gitignore됨)
+  - Streamlit Cloud: 앱 설정 Secrets에 `DART_API_KEY = "발급받은키"` (섹션 없이 최상위)
 
-로 설정하면 `config.DART_API_KEY`로 자동 로드된다. 키가 없으면 이 모듈의
-함수들은 DartKeyMissing을 던진다 — 호출부(app.py)에서 잡아서 안내 메시지로 보여준다.
+`config.get_dart_api_key()`가 매 호출마다 환경변수 → Streamlit secrets 순으로 조회한다
+(import 시점에 굳히면 secrets 지연 로딩을 못 잡는다). 키가 없으면 이 모듈의 함수들은
+DartKeyMissing을 던진다 — 호출부(app.py)에서 잡아서 안내 메시지로 보여준다.
 """
 
 from __future__ import annotations
@@ -30,12 +32,15 @@ class DartKeyMissing(RuntimeError):
 
 
 def _get_key() -> str:
-    if not config.DART_API_KEY:
+    key = config.get_dart_api_key()
+    if not key:
         raise DartKeyMissing(
-            "DART_API_KEY가 설정되지 않았습니다. https://opendart.fss.or.kr 에서 키를 "
-            "발급받아 프로젝트 루트의 .env 파일에 DART_API_KEY=발급받은키 로 추가하세요."
+            "DART_API_KEY가 설정되지 않았습니다. https://opendart.fss.or.kr 에서 키를 발급받아 "
+            "→ 로컬: 프로젝트 루트 .env 파일에 DART_API_KEY=발급받은키 "
+            "→ Streamlit Cloud: 앱 설정 Secrets에 DART_API_KEY = \"발급받은키\" 를 "
+            "(다른 [섹션] 안이 아니라 파일 최상위에) 추가하세요."
         )
-    return config.DART_API_KEY
+    return key
 
 
 def _corp_code_map(use_cache: bool = True) -> pd.DataFrame:

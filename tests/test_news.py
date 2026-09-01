@@ -4,6 +4,9 @@ sentiment는 순수 함수라 오프라인. news/dart는 외부 사이트·API�
 dart는 DART_API_KEY가 없으면 자동으로 skip한다 (키 발급은 사용자 몫).
 """
 
+import sys
+import types
+
 import pandas as pd
 import pytest
 
@@ -186,10 +189,37 @@ def test_fetch_news_with_sentiment_end_to_end():
 
 
 def test_dart_raises_without_key(monkeypatch):
-    monkeypatch.setattr(config, "DART_API_KEY", "")
-    monkeypatch.setattr(dart.config, "DART_API_KEY", "")
+    monkeypatch.setattr(dart.config, "get_dart_api_key", lambda: "")
     with pytest.raises(dart.DartKeyMissing):
         dart.fetch_disclosures("005930")
+
+
+def test_get_dart_api_key_prefers_env(monkeypatch):
+    monkeypatch.setenv("DART_API_KEY", "  from-env  ")
+    assert config.get_dart_api_key() == "from-env"  # 양끝 공백 제거
+
+
+def test_get_dart_api_key_falls_back_to_streamlit_secrets(monkeypatch):
+    """환경변수가 비어 있으면 st.secrets를 조회한다 (Streamlit Cloud 경로)."""
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+
+    fake_st = types.SimpleNamespace(secrets={"DART_API_KEY": "from-secrets"})
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+
+    assert config.get_dart_api_key() == "from-secrets"
+
+
+def test_get_dart_api_key_empty_when_nothing_set(monkeypatch):
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+
+    # st.secrets 접근 시 파일 없음 예외를 던지는 상황을 흉내낸다.
+    class _NoSecrets:
+        @property
+        def secrets(self):
+            raise RuntimeError("no secrets.toml")
+
+    monkeypatch.setitem(sys.modules, "streamlit", _NoSecrets())
+    assert config.get_dart_api_key() == ""
 
 
 @pytest.mark.network

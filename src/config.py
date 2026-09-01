@@ -47,8 +47,32 @@ CACHE_TTL_SEC = 6 * 60 * 60
 NEWS_CACHE_TTL_SEC = 30 * 60
 
 # DART(전자공시시스템) OpenAPI 키. https://opendart.fss.or.kr 에서 무료 발급.
-# 프로젝트 루트에 .env 파일을 만들어 DART_API_KEY=... 로 설정한다 (.env는 gitignore됨).
+# 로컬: 프로젝트 루트에 .env 파일을 만들어 DART_API_KEY=... 로 설정 (.env는 gitignore됨).
+# Streamlit Cloud: 앱 설정 Secrets에 DART_API_KEY = "..." 를 섹션 없이 최상위에 추가.
+# 아래 상수는 import 시점 스냅샷일 뿐 — 런타임 조회는 반드시 get_dart_api_key()를 쓴다.
 DART_API_KEY = os.environ.get("DART_API_KEY", "")
+
+
+def get_dart_api_key() -> str:
+    """DART OpenAPI 키를 런타임에 조회한다.
+
+    우선순위: (1) 환경변수 DART_API_KEY(로컬 .env 포함), (2) Streamlit secrets.
+
+    모듈 상수(DART_API_KEY)로 고정하지 않는 이유: Streamlit Cloud에 Secrets로 넣은
+    키가 os.environ에 안 실리는 경우가 있다 — 섹션([xxx]) 안에 넣었거나, secrets 지연
+    로딩이 config import보다 늦은 경우. import 시점에 값을 굳히면 이후 secrets가 로드돼도
+    빈 문자열로 남는다. 그래서 매 호출마다 os.environ과 st.secrets를 다시 확인한다.
+    """
+    key = os.environ.get("DART_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        import streamlit as st  # 대시보드에서만 존재(노트북/GitHub Actions엔 없음)
+
+        # secrets 파일이 아예 없으면 접근 시 예외가 나므로 통째로 감싼다.
+        return str(st.secrets.get("DART_API_KEY", "") or "").strip()
+    except Exception:
+        return ""
 
 # 자주 쓰는 지수 심볼 (FinanceDataReader 표기)
 INDICES = {
