@@ -269,7 +269,7 @@ _TOP_ROW_HEIGHT = 800
 _BOTTOM_ROW_HEIGHT = 760  # 가격예측·뉴스&공시 박스 세로 (기존 380의 2배)
 # 뉴스&공시 박스 내부 크기 — _BOTTOM_ROW_HEIGHT(760)에서 상단 선택줄·하단 페이지색인·
 # 여백을 뺀 값(대략치라 브라우저로 보며 미세조정 필요할 수 있음).
-_NEWS_SCROLL_HEIGHT = 580  # 뉴스 카드 스크롤 영역 (아래 페이지 색인 자리를 남김)
+_NEWS_SCROLL_HEIGHT = 620  # 뉴스 카드 스크롤 영역 (아래 페이지 색인+건수 한 줄 자리를 남김)
 _DART_TABLE_HEIGHT = 650  # 공시(DART) 표 — 페이지 색인이 없어 더 크게
 _NEWS_FETCH_TOTAL = 100  # 최초에 받아둘 뉴스 목록 개수 (페이지네이션 대상)
 _NEWS_PAGE_SIZE_OPTS = [10, 15, 20]  # 페이지당 표시 개수
@@ -1168,13 +1168,21 @@ with right_col:
                                     unsafe_allow_html=True,
                                 )
 
-                st.caption(
-                    f"전체 {n_items}건 중 {start + 1}–{start + len(news_df)}번째 · {page}/{n_pages} 페이지"
-                )
-                if n_pages > 1:
-                    st.pills(
-                        "페이지",
-                        options=list(range(1, n_pages + 1)),
-                        key=pills_key,
-                        label_visibility="collapsed",
+                # 페이지 색인(왼쪽)과 건수 안내(오른쪽 끝 정렬)를 한 줄에 합친다.
+                pages_col, idx_col = st.columns([3, 2], vertical_alignment="center")
+                with pages_col:
+                    if n_pages > 1:
+                        st.pills(
+                            "페이지",
+                            options=list(range(1, n_pages + 1)),
+                            key=pills_key,
+                            label_visibility="collapsed",
+                        )
+                with idx_col:
+                    st.markdown(
+                        "<div style='text-align:right;font-size:0.875em;opacity:0.6;"
+                        "white-space:nowrap;'>"
+                        f"전체 {n_items}건 중 {start + 1}–{start + len(news_df)}번째 · "
+                        f"{page}/{n_pages} 페이지</div>",
+                        unsafe_allow_html=True,
                     )
