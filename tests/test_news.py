@@ -194,6 +194,43 @@ def test_dart_raises_without_key(monkeypatch):
         dart.fetch_disclosures("005930")
 
 
+@pytest.fixture
+def _reset_dart_cooldown():
+    dart._unavailable_until = 0.0
+    yield
+    dart._unavailable_until = 0.0
+
+
+def test_dart_get_converts_network_error_to_unavailable(monkeypatch, _reset_dart_cooldown):
+    import requests
+
+    def _boom(*a, **k):
+        raise requests.ConnectTimeout("connection timed out")
+
+    monkeypatch.setattr(requests, "get", _boom)
+    with pytest.raises(dart.DartUnavailable):
+        dart._dart_get("list.json", {"x": 1})
+
+
+def test_dart_get_cooldown_skips_network_after_failure(monkeypatch, _reset_dart_cooldown):
+    import requests
+
+    calls = {"n": 0}
+
+    def _boom(*a, **k):
+        calls["n"] += 1
+        raise requests.ConnectTimeout("connection timed out")
+
+    monkeypatch.setattr(requests, "get", _boom)
+
+    with pytest.raises(dart.DartUnavailable):
+        dart._dart_get("list.json", {"x": 1})
+    with pytest.raises(dart.DartUnavailable):
+        dart._dart_get("list.json", {"x": 1})  # 쿨다운 중 — 네트워크를 다시 안 친다
+
+    assert calls["n"] == 1
+
+
 def test_get_dart_api_key_prefers_env(monkeypatch):
     monkeypatch.setenv("DART_API_KEY", "  from-env  ")
     assert config.get_dart_api_key() == "from-env"  # 양끝 공백 제거

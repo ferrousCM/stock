@@ -198,8 +198,18 @@ def _crypto_news(keyword: str, n: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=config.NEWS_CACHE_TTL_SEC, show_spinner="공시 불러오는 중...")
-def _dart(code: str) -> pd.DataFrame:
-    return dart.fetch_disclosures(code)
+def _dart(code: str) -> tuple[pd.DataFrame, str]:
+    """(공시 DataFrame, 상태). 상태: "ok" | "unavailable" | "no_key".
+
+    예외를 그대로 올리면 st.cache_data가 결과를 캐시하지 않아 매 렌더마다 DART를 다시
+    때리고(해외에서 매번 수 초씩 매달림), 안 잡히면 대시보드 전체가 죽는다. 실패도
+    값으로 돌려 캐시에 태운다 — TTL(30분) 동안은 재시도하지 않는다."""
+    try:
+        return dart.fetch_disclosures(code), "ok"
+    except dart.DartUnavailable:
+        return pd.DataFrame(), "unavailable"
+    except dart.DartKeyMissing:
+        return pd.DataFrame(), "no_key"
 
 
 def _safe_predict_advanced(
@@ -1086,20 +1096,27 @@ with right_col:
 
         if dart_tab is not None:
             with dart_tab:
-                try:
-                    dart_df = _dart(selected_code)
-                except dart.DartKeyMissing as e:
-                    st.info(str(e))
+                dart_df, dart_status = _dart(selected_code)
+                if dart_status == "no_key":
+                    st.info(
+                        "DART_API_KEY가 설정되지 않아 공시를 불러올 수 없습니다. "
+                        "앱 설정 Secrets에 DART_API_KEY를 (섹션 없이 최상위에) 추가하세요."
+                    )
+                elif dart_status == "unavailable":
+                    st.info(
+                        "DART 서버에 연결하지 못했습니다. 한국 외 지역(예: Streamlit Cloud) "
+                        "배포에서는 opendart.fss.or.kr 접속이 제한될 수 있습니다. "
+                        "잠시 후 다시 시도해 주세요."
+                    )
+                elif dart_df.empty:
+                    st.info("최근 90일 내 공시가 없습니다.")
                 else:
-                    if dart_df.empty:
-                        st.info("최근 90일 내 공시가 없습니다.")
-                    else:
-                        st.dataframe(
-                            dart_df.rename(
-                                columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}
-                            ),
-                            column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
-                            hide_index=True,
-                            height=260,
-                            width="stretch",
-                        )
+                    st.dataframe(
+                        dart_df.rename(
+                            columns={"rcept_dt": "접수일", "report_nm": "보고서명", "flr_nm": "제출인"}
+                        ),
+                        column_config={"url": st.column_config.LinkColumn("링크", display_text="열기")},
+                        hide_index=True,
+                        height=260,
+                        width="stretch",
+                    )

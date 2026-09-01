@@ -555,7 +555,7 @@ with right_col:
         with dart_tab:
             try:
                 dart_df = _dart(selected_code)
-            except dart.DartKeyMissing as e:
+            except (dart.DartKeyMissing, dart.DartUnavailable) as e:
                 st.info(str(e))
             else:
                 if dart_df.empty:

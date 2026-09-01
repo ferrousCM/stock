@@ -74,6 +74,7 @@ def get_dart_api_key() -> str:
     except Exception:
         return ""
 
+
 # 자주 쓰는 지수 심볼 (FinanceDataReader 표기)
 INDICES = {
     "KOSPI": "KS11",
