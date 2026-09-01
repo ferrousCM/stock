@@ -1,4 +1,4 @@
-"""모의투자 성과 리포팅 — v1(`pages/모의투자.py`)과 v2(`pages/모의투자_v2.py`)가 공유하는
+"""모의투자 성과 리포팅 — `pages/모의투자.py`(기본 모델/전략 모델 펼치기 UI)가 공유하는
 순수 렌더 함수들. PRD.md 5.6·10장 8단계·11장 3단계 참고.
 
 **읽기 전용.** 매매를 유발하는 코드를 단 한 줄도 포함하지 않는다 — `trading_agent`/
@@ -6,12 +6,12 @@
 import조차 하지 않는다. 실행(매매)은 `scripts/run_daily_trading.py` + GitHub Actions가
 전담하고, 여기는 그 결과(원장)만 봇 레지스트리·원장 디렉터리 함수를 받아 보여준다.
 
-**리팩터 배경(PRD 11장 3단계)**: `_render_bot_dashboard()`/`_render_comparison()`과 그
-보조 함수들은 원래 `pages/모의투자.py`에 있었지만, 처음부터 `(bot_id, label,
-portfolio_dir)` 등 인자만 받는 순수 렌더 함수였다 — 로직 변경 없이 그대로 이 모듈로
-옮기고, v1/v2 두 페이지가 각자의 봇 레지스트리(`BOT_STRATEGIES`/`BOT_STRATEGIES_V2`)와
-원장 디렉터리 함수(`config.portfolio_dir_for`/`portfolio_dir_for_v2`)만 넘겨
-`render_page()`를 호출한다 — "기본 프레임 동일 유지" 요구사항을 코드 중복 없이 만족한다.
+**기본 모델/전략 모델 통합**: 원래 v1(`BOT_STRATEGIES`)과 v2(`BOT_STRATEGIES_V2`)는 각각
+별도 페이지(`pages/모의투자.py`/`pages/모의투자_v2.py`)였다. 사이드바를 단순하게 유지하려고
+한 페이지("모의투자")로 합치고, `st.expander`로 "기본 모델"/"전략 모델"을 펼치기/숨기기
+하도록 바꿨다 — 그래서 머리말(`render_header`)과 모델별 탭 묶음(`render_body`)을 분리했다.
+`render_body`는 `(bot_id, label, portfolio_dir)` 등 인자만 받는 순수 렌더 함수이고,
+`key_prefix`로 두 모델이 같은 bot_id("default" 등)를 쓰더라도 위젯 key가 겹치지 않게 한다.
 """
 
 from __future__ import annotations
@@ -23,17 +23,16 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import config, portfolio, predictor, screener
+from src import config, portfolio, predictor, screener, theme
 from src import data_loader as dl
+from src import indicators as ind
 
-PORTFOLIO_COLOR = "#0ea5e9"  # 포트폴리오 자산 라인 (하늘색) — 기본형 봇 비교 색으로도 재사용
-AGGRESSIVE_COLOR = "#f97316"  # 공격적 봇 비교 색 (주황)
-MOMENTUM_COLOR = "#8b5cf6"  # 모멘텀 봇 비교 색 (보라)
-KOSPI_COLOR = "#f59e0b"  # 코스피 비교 라인 — charts.py의 지수 오버레이 색(amber)과 통일
-UP_COLOR, DOWN_COLOR, FLAT_COLOR = "#ef4444", "#3b82f6", "#6b7280"  # app.py와 동일한 국내 관행
-UP_SOFT, DOWN_SOFT, FLAT_SOFT = "#cc6666", "#668dcc", "#9ca3af"  # 파스텔 — 매수/매도 표시·예측값용
+PORTFOLIO_COLOR = theme.BOT_COLORS["default"]  # 봇 자체 대시보드의 자산 라인 기본색(기본형 색 재사용)
+KOSPI_COLOR = theme.KOSPI_COLOR  # 코스피 비교 라인
+UP_COLOR, DOWN_COLOR, FLAT_COLOR = theme.UP_COLOR, theme.DOWN_COLOR, theme.FLAT_COLOR
+UP_SOFT, DOWN_SOFT, FLAT_SOFT = theme.UP_SOFT, theme.DOWN_SOFT, theme.FLAT_SOFT
 
-_BOT_COMPARE_COLOR = {"default": PORTFOLIO_COLOR, "aggressive": AGGRESSIVE_COLOR, "momentum": MOMENTUM_COLOR}
+_BOT_COMPARE_COLOR = theme.BOT_COLORS
 
 
 def _change_html(diff: float, pct: float) -> str:
@@ -155,9 +154,13 @@ def _stock_detail_dialog(code: str, name: str, all_trades: pd.DataFrame) -> None
         )
 
 
-def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
+def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path, *, key_prefix: str = "") -> dict:
     """봇 하나의 전체 리포트(요약 지표·자산 추이·보유종목·거래내역·거래 요약)를 그리고,
-    "성과 비교" 탭에서 쓸 요약 dict를 반환한다. 원장을 읽기만 한다."""
+    "성과 비교" 탭에서 쓸 요약 dict를 반환한다. 원장을 읽기만 한다.
+
+    key_prefix: 위젯 key 접두사. v1/v2 두 봇 레지스트리가 같은 bot_id("default" 등)를
+    재사용하므로, 한 페이지에 v1/v2를 같이 그릴 때(모의투자 탭의 기본/전략 모델 펼치기)
+    key 충돌을 막으려고 호출부가 "v1_"/"v2_" 같은 접두사를 넘긴다."""
     state = portfolio.get_state(portfolio_dir)
     holdings = portfolio.get_holdings(portfolio_dir)
     trades = portfolio.get_trades(portfolio_dir)
@@ -228,7 +231,12 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
 
         fig = go.Figure()
         fig.add_trace(
-            go.Scatter(x=eh["date"], y=port_idx, name=label, line=dict(width=2.4, color=PORTFOLIO_COLOR))
+            go.Scatter(
+                x=eh["date"],
+                y=port_idx,
+                name=label,
+                line=dict(width=2.4, color=_BOT_COMPARE_COLOR.get(bot_id, PORTFOLIO_COLOR)),
+            )
         )
         if kospi_idx is not None:
             fig.add_trace(
@@ -287,7 +295,7 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
             width="stretch",
             on_select="rerun",
             selection_mode="single-row",
-            key=f"holdings_table_{bot_id}",
+            key=f"holdings_table_{key_prefix}{bot_id}",
         )
         holdings_selected = holdings_event.selection.rows if hasattr(holdings_event, "selection") else []
         if holdings_selected:
@@ -312,11 +320,11 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
         with fcol1:
             min_d, max_d = trades_all["date"].min().date(), trades_all["date"].max().date()
             date_range = st.date_input(
-                "기간", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"date_range_{bot_id}"
+                "기간", value=(min_d, max_d), min_value=min_d, max_value=max_d, key=f"date_range_{key_prefix}{bot_id}"
             )
         with fcol2:
             query = st.text_input(
-                "종목명 또는 종목코드 검색", placeholder="예: 삼성전자 또는 005930", key=f"query_{bot_id}"
+                "종목명 또는 종목코드 검색", placeholder="예: 삼성전자 또는 005930", key=f"query_{key_prefix}{bot_id}"
             )
 
         filtered = trades_all
@@ -348,7 +356,7 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
                 height=360,  # 계속 쌓일 이력 대비 고정 높이 — 넘치면 표 안에서 스크롤
                 on_select="rerun",
                 selection_mode="single-row",
-                key=f"trades_table_{bot_id}",
+                key=f"trades_table_{key_prefix}{bot_id}",
             )
             selected_rows = event.selection.rows if hasattr(event, "selection") else []
             if selected_rows:
@@ -373,8 +381,10 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
         )
 
         eq = equity_hist[["date", "cash", "holdings_value", "total_equity"]].copy()
-        eq["전일대비"] = eq["total_equity"].diff()
-        eq["전일대비율"] = eq["total_equity"].pct_change() * 100
+        # 첫 거래일은 diff()/pct_change()가 NaN을 주는데, NumberColumn은 NaN도 빈 칸이 아니라
+        # 문자열 "None"으로 그대로 보여준다(_pct_or_dash 참고) — 여기서 직접 문자열로 포맷한다.
+        eq["전일대비"] = eq["total_equity"].diff().map(lambda v: "—" if pd.isna(v) else f"{v:+,.0f}원")
+        eq["전일대비율"] = (eq["total_equity"].pct_change() * 100).map(_pct_or_dash)
         eq["시작대비"] = (eq["total_equity"] / portfolio.INITIAL_CASH - 1) * 100
 
         daily_summary = eq.merge(daily_counts, on="date", how="left")
@@ -389,10 +399,21 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
             }
         )
 
-        def _color_diff(val: float) -> str:
-            if pd.isna(val) or val == 0:
-                return ""
-            return f"color:{UP_COLOR};font-weight:600" if val > 0 else f"color:{DOWN_COLOR};font-weight:600"
+        def _color_diff(val: float | str) -> str:
+            """전일대비/전일대비율(문자열로 미리 포맷됨)과 시작대비(숫자) 둘 다 처리한다."""
+            if isinstance(val, str):
+                if val in ("—", ""):
+                    return ""
+                positive, negative = val.startswith("+"), val.startswith("-")
+            else:
+                if pd.isna(val) or val == 0:
+                    return ""
+                positive, negative = val > 0, val < 0
+            if positive:
+                return f"color:{UP_COLOR};font-weight:600"
+            if negative:
+                return f"color:{DOWN_COLOR};font-weight:600"
+            return ""
 
         show_summary = daily_summary[
             [
@@ -411,8 +432,6 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
             show_summary.style.map(_color_diff, subset=["전일대비", "전일대비율", "시작대비"]),
             column_config={
                 "총자산": st.column_config.NumberColumn(format="%,.0f원"),
-                "전일대비": st.column_config.NumberColumn(format="%+,.0f원"),
-                "전일대비율": st.column_config.NumberColumn(format="%+.2f%%"),
                 "시작대비": st.column_config.NumberColumn(format="%+.2f%%"),
                 "현금잔고": st.column_config.NumberColumn(format="%,.0f원"),
                 "주식평가금액": st.column_config.NumberColumn(format="%,.0f원"),
@@ -439,6 +458,45 @@ def _render_bot_dashboard(bot_id: str, label: str, portfolio_dir: Path) -> dict:
     }
 
 
+_MIN_RISK_STAT_DAYS = 20  # 연환산(CAGR/샤프)은 기간이 너무 짧으면 값이 비정상적으로 부풀려진다
+
+
+def _pct_or_dash(v: float | None, *, signed: bool = True) -> str:
+    """st.column_config.NumberColumn은 값이 None/NaN이면 빈 칸이 아니라 문자열 "None"을
+    그대로 보여준다(이 Streamlit 버전의 동작) — 표에 "None"이 찍히지 않도록 여기서 직접
+    포맷 문자열로 바꾸고, 없는 값은 "—"로 통일한다."""
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{v:+.2f}%" if signed else f"{v:.2f}%"
+
+
+def _num_or_dash(v: float | None) -> str:
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{v:.2f}"
+
+
+def _risk_stats(equity_hist: pd.DataFrame) -> dict:
+    """자산 추이만으로 계산 가능한 위험/수익 지표(CAGR·변동성·샤프지수·MDD, 문자열로 이미
+    포맷됨) — 연율화 지표라 최소 _MIN_RISK_STAT_DAYS(약 한 달)치는 쌓여야 의미가 있다(예:
+    3주치로 연율화하면 +-90% 같은 값이 나와 오히려 오해를 부른다). indicators.summary()가
+    이미 종목 성과 요약에 쓰는 계산을 그대로 재사용한다."""
+    if len(equity_hist) < 2:
+        return {"cagr": "—", "volatility": "—", "sharpe": "—", "max_drawdown": "—"}
+    eh = equity_hist.copy()
+    eh["date"] = pd.to_datetime(eh["date"])
+    stat = ind.summary(eh.set_index("date")["total_equity"])
+    # MDD(관측된 낙폭 그 자체)는 기간과 무관하게 바로 의미가 있어 항상 보여준다 — CAGR/변동성/
+    # 샤프지수만 연율화(annualize)된 값이라 기간이 짧으면 값이 부풀려져 최소 기간을 요구한다.
+    enough_history = len(equity_hist) >= _MIN_RISK_STAT_DAYS
+    return {
+        "cagr": _pct_or_dash(stat["cagr"] * 100) if enough_history else "—",
+        "volatility": _pct_or_dash(stat["volatility"] * 100, signed=False) if enough_history else "—",
+        "sharpe": _num_or_dash(stat["sharpe"]) if enough_history else "—",
+        "max_drawdown": _pct_or_dash(stat["max_drawdown"] * 100, signed=False),
+    }
+
+
 def _render_comparison(summaries: list[dict]) -> None:
     """세 봇의 요약 표 + 자산 추이 오버레이 차트. 각 봇 탭을 다 그린 뒤 호출되지만,
     st.tabs()가 반환하는 컨테이너는 코드 실행 순서와 무관하게 그 탭 위치에 렌더링되므로
@@ -455,23 +513,36 @@ def _render_comparison(summaries: list[dict]) -> None:
                 "봇": s["label"],
                 "총자산": s["total_equity"],
                 "누적수익률": s["cum_return_pct"],
-                "코스피 대비 초과수익률": s["excess_pct"],
+                "코스피 대비 초과수익률": _pct_or_dash(s["excess_pct"]),
+                **_risk_stats(s["equity_hist"]),
                 "보유종목수": s["n_holdings"],
                 "누적거래횟수": s["n_trades"],
                 "마지막 매매 기준일": s["last_run"] if s["last_run"] else "아직 없음",
             }
             for s in summaries
         ]
+    ).rename(
+        columns={
+            "cagr": "연환산 수익률",
+            "volatility": "변동성",
+            "sharpe": "샤프지수",
+            "max_drawdown": "최대낙폭(MDD)",
+        }
     )
     st.dataframe(
         table,
         column_config={
             "총자산": st.column_config.NumberColumn(format="%,.0f원"),
             "누적수익률": st.column_config.NumberColumn(format="%+.2f%%"),
-            "코스피 대비 초과수익률": st.column_config.NumberColumn(format="%+.2f%%"),
         },
         hide_index=True,
         width="stretch",
+    )
+    st.caption(
+        f"최대낙폭(MDD)은 자산 추이 기록이 2거래일만 쌓여도 계산되지만, 연환산 수익률(CAGR)·"
+        f"변동성·샤프지수는 최소 {_MIN_RISK_STAT_DAYS}거래일치가 쌓여야 표시됩니다(기간이 "
+        "너무 짧으면 연 단위로 환산했을 때 값이 실제보다 크게 부풀려집니다). "
+        "샤프지수는 위험 대비 수익 — 높을수록, MDD는 고점 대비 최대 하락폭 — 0에 가까울수록 유리합니다."
     )
 
     plot_data = [s for s in summaries if len(s["equity_hist"]) >= 2]
@@ -525,45 +596,56 @@ def _render_comparison(summaries: list[dict]) -> None:
     )
 
 
-def render_page(
-    bot_strategies: dict,
-    portfolio_dir_fn: Callable[[str], Path],
-    *,
-    title: str = "💰 모의투자",
-    extra_caption: str | None = None,
-) -> None:
-    """모의투자 성과 리포팅 페이지 전체를 그린다 — v1/v2 페이지 파일이 이 함수 하나만
-    호출한다. `bot_strategies`는 `{bot_id: {label, decide_trades, rules}}` 형태
-    (`decide_trades`/`rules`는 이 함수가 안 씀 — 화면은 원장만 읽으므로 무시된다),
-    `portfolio_dir_fn`은 `config.portfolio_dir_for`류(봇 id → 원장 경로) 함수다.
+def render_header(title: str = "💰 모의투자", *, extra_caption: str | None = None) -> None:
+    """모의투자 페이지 공통 머리말(제목·면책 경고·안내 캡션)을 한 번만 그린다.
 
-    `extra_caption`을 넘기면 표준 면책 캡션 뒤에 별도 캡션으로 덧붙인다 — v2 페이지가
-    "이건 실험적인 두 번째 버전입니다" 같은 안내를 추가할 때 쓴다(PRD 11.6/11.9).
+    `pages/모의투자.py`가 기본/전략 두 모델을 펼치기(expander)로 함께 보여주므로, 모델별로
+    반복되는 render_body()와 분리해 이 머리말은 페이지당 한 번만 호출한다.
     """
+    theme.inject_base_css()
     st.title(title)
 
     st.warning(
-        "⚠️ **실제 금전 거래가 아닌 시뮬레이션입니다. 투자 조언이 아닙니다.** "
-        "가상 현금 1억원으로 시작해 규칙 기반 엔진이 자동으로 매매한 결과를 보여줄 뿐, "
-        "특정 종목의 매수·매도를 권유하는 것이 아닙니다.",
+        "⚠️ **실제 돈이 아닌 모의(가상) 투자입니다. 투자 조언이 아닙니다.** "
+        "가상 현금 1억원을 규칙 기반 엔진이 자동으로 매매한 결과이며, "
+        "특정 종목을 사거나 팔라고 권하는 것이 아닙니다.",
         icon="⚠️",
     )
     st.caption(
         "장중 실시간이 아니라 **하루 1회, 장 마감 후** 자동 매매된 결과입니다 "
-        "(GitHub Actions가 평일 19:30 KST 전후 실행). 방문 시점과 매매 실행 시점은 무관합니다. "
-        "**기본형/공격적/모멘텀** 세 봇이 같은 날 같은 시세·신호를 보고 서로 다른 판단 로직으로 "
-        "독립적으로 매매합니다 — 성과 비교 목적이며 봇 간 자금 이동은 없습니다."
+        "(평일 저녁 자동 실행). 방문 시점과 매매 실행 시점은 무관합니다."
     )
     if extra_caption:
         st.caption(extra_caption)
 
+
+def render_body(
+    bot_strategies: dict,
+    portfolio_dir_fn: Callable[[str], Path],
+    *,
+    key_prefix: str = "",
+) -> None:
+    """모델 하나(봇 레지스트리 하나)의 탭 묶음(성과 비교 + 봇별 탭)을 그린다.
+
+    `bot_strategies`는 `{bot_id: {label, decide_trades, rules}}` 형태(`decide_trades`/
+    `rules`는 이 함수가 안 씀 — 화면은 원장만 읽으므로 무시된다), `portfolio_dir_fn`은
+    `config.portfolio_dir_for`류(봇 id → 원장 경로) 함수다. `key_prefix`는 위젯 key 접두사
+    — 기본 모델/전략 모델이 한 페이지에 같이 그려질 때 bot_id가 겹쳐도 key 충돌이
+    나지 않게 한다(_render_bot_dashboard 참고).
+    """
+    st.caption(
+        "**기본형/공격적/모멘텀** 세 봇이 같은 날 같은 시세·신호를 보고 서로 다른 판단 "
+        "로직으로 독립적으로 매매합니다 — 성과 비교 목적이며 봇 간 자금 이동은 없습니다."
+    )
     tab_labels = ["📊 성과 비교"] + [meta["label"] for meta in bot_strategies.values()]
     tabs = st.tabs(tab_labels)
 
     summaries = []
     for (bot_id, meta), tab in zip(bot_strategies.items(), tabs[1:], strict=True):
         with tab:
-            summaries.append(_render_bot_dashboard(bot_id, meta["label"], portfolio_dir_fn(bot_id)))
+            summaries.append(
+                _render_bot_dashboard(bot_id, meta["label"], portfolio_dir_fn(bot_id), key_prefix=key_prefix)
+            )
 
     with tabs[0]:
         _render_comparison(summaries)

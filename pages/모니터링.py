@@ -32,7 +32,9 @@ from src import (
     dart,
     news,
     predictor,
+    resizable_chart,
     screener,
+    theme,
     us_screener,
 )
 from src import data_loader as dl
@@ -41,9 +43,12 @@ from src import indicators as ind
 DATE_RANGES = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "2년": 730, "3년": 1095, "전체": None}
 SMA_CHOICES = (5, 20, 60, 120)
 
-UP_COLOR, DOWN_COLOR, FLAT_COLOR = "#ef4444", "#3b82f6", "#6b7280"  # 실측 시세용 (원색)
-UP_SOFT, DOWN_SOFT, FLAT_SOFT = "#cc6666", "#668dcc", "#9ca3af"  # 예측값용 (파스텔)
+# 바이낸스 다크모드 배색(상승=초록/하락=빨강) — src/theme.py에서 공유. app.py는 국내 관행
+# (상승=빨강/하락=파랑)을 그대로 유지하므로 이 파일에서만 이 색상을 쓴다.
+UP_COLOR, DOWN_COLOR, FLAT_COLOR = theme.UP_COLOR, theme.DOWN_COLOR, theme.FLAT_COLOR
+UP_SOFT, DOWN_SOFT, FLAT_SOFT = theme.UP_SOFT, theme.DOWN_SOFT, theme.FLAT_SOFT
 _SENT_COLOR = {"긍정": UP_COLOR, "중립": FLAT_COLOR, "부정": DOWN_COLOR}
+_MODEL_LABELS = {"Ridge": "안정형", "RandomForest": "다각형", "GradientBoosting": "정밀형"}
 
 _CRYPTO_BENCHMARKS = {"비트코인": "KRW-BTC", "이더리움": "KRW-ETH", "리플": "KRW-XRP"}
 _CRYPTO_DEFAULT = ("KRW-BTC", "비트코인")
@@ -112,19 +117,16 @@ def _big_money(v: float, *, unit: str = "원", usd_rate: float | None = None) ->
 
 
 def _section_title(text: str) -> None:
-    """카드 제목을 스크롤 가능한 컨테이너 상단에 고정(sticky)해서 그린다.
-
-    st.container(height=N)는 내용이 넘치면 내부 스크롤이 생기는데, 제목이 맨 위 콘텐츠로만
-    있으면 스크롤할 때 같이 밀려 올라가 사라진다. position:sticky + top:0으로 컨테이너
-    스크롤 영역 상단에 고정한다 — 배경은 스크롤되는 내용이 뒤로 비치지 않도록 불투명하게
-    높이고 블러를 얹었다(연한 반투명이면 표/차트 내용이 제목 뒤로 겹쳐 보인다).
+    """카드 제목을 스크롤 가능한 높이 고정 박스(st.container(height=N)) *바깥*, 바로 위에
+    그린다 — 이 프로젝트가 쓰는 Streamlit 버전에서는 컨테이너 내부에 position:sticky를 써도
+    실측 결과 그대로 스크롤을 따라 밀려 올라가 사라진다(래퍼 구조 문제로 추정, CSS만으로는
+    못 고침). 그래서 제목을 아예 스크롤 영역 밖에 둬 내부 스크롤과 무관하게 항상 보이게
+    한다 — 호출부가 `with st.container(height=N):` *진입 전에* 이 함수를 호출해야 한다.
     """
     st.markdown(
-        "<div style='background:rgba(127,127,127,0.55);backdrop-filter:blur(6px);"
-        "-webkit-backdrop-filter:blur(6px);border-radius:6px;"
-        "padding:0.4rem 0.7rem;margin-bottom:0.5rem;font-weight:700;"
-        "font-size:1.05rem;line-height:1.3;position:sticky;top:0;z-index:5;"
-        f"'>{text}</div>",
+        "<div style='background:rgba(127,127,127,0.55);border-radius:6px;"
+        "padding:0.4rem 0.7rem;margin-bottom:0.4rem;font-weight:700;"
+        f"font-size:1.05rem;line-height:1.3;'>{text}</div>",
         unsafe_allow_html=True,
     )
 
@@ -211,32 +213,14 @@ def _safe_predict_advanced(
         return {"error": f"예측 중 오류가 발생했습니다: {e}"}
 
 
-# ------------------------------------------------------------------ 컴팩트 레이아웃용 전역 CSS (app.py와 동일)
-st.markdown(
-    """
-<style>
-.block-container {padding-top: 1rem; padding-bottom: 1rem;}
-h1, h2, h3, h4, h5 {margin-top: 0.1rem; margin-bottom: 0.3rem;}
-div[data-testid="stVerticalBlock"] {gap: 0.45rem;}
-[data-testid="stMetricValue"] {font-size: 1.25rem;}
-[data-testid="stMetricLabel"] {font-size: 0.88rem;}
-[data-testid="stMetricDelta"] {font-size: 0.88rem;}
-.stTabs [data-baseweb="tab-list"] {gap: 4px;}
-.stTabs [data-baseweb="tab"] {padding: 4px 10px; font-size: 0.92rem;}
-div[data-testid="stWidgetLabel"] p {font-size: 0.88rem; margin-bottom: 0.1rem;}
-.stButton button {padding: 0.25rem 0.7rem; font-size: 0.88rem;}
-hr {margin: 0.5rem 0;}
-p, .stCaption, .stMarkdown, label, span {font-size: 0.92rem;}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+# ------------------------------------------------------------------ 컴팩트 레이아웃·다크모드·사이드바 너비 공통 CSS
+theme.inject_base_css()
 st.markdown("##### 🖥️ 모니터링")
 
 # ==================================================================== 맨 위: 시장 선택
 top_left, _top_rest = st.columns([2, 8])
 with top_left:
-    market_type = st.radio("시장 구분", ["국내증시", "해외증시", "코인"], horizontal=True, key="market_type")
+    market_type = st.selectbox("시장 구분", ["국내증시", "해외증시", "코인"], key="market_type")
 is_crypto = market_type == "코인"
 is_us = market_type == "해외증시"
 if is_crypto:
@@ -265,298 +249,298 @@ _STOCK_TABLE_HEIGHT = 480
 _CRYPTO_TABLE_HEIGHT = 520
 
 # ==================================================================== 좌측 상단: 스크리닝
-with left_col, st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
+with left_col:
     _section_title("🌎 해외증시 요약" if is_us else "🪙 코인 요약" if is_crypto else "📊 주가 요약")
+    with st.container(key="summary", border=True, height=_TOP_ROW_HEIGHT):
 
-    if is_crypto:
-        top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
-        if st.button("🔄", help="새로고침 (캐시 초기화)"):
-            st.cache_data.clear()
-            st.rerun()
-
-        try:
-            universe = _crypto_screen()
-        except Exception as e:
-            st.error(f"코인 시세를 불러오지 못했습니다: {e}")
-            st.stop()
-
-        market_label = "업비트 KRW"
-
-        def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
-            display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
-            display[value_label] = ranked[value_col] / scale
-            col_config = {
-                "종가": st.column_config.NumberColumn(format="%,.0f원"),
-                value_label: st.column_config.NumberColumn(format=fmt),
-            }
-            return st.dataframe(
-                display[["종목명", "종가", value_label]],
-                width="stretch",
-                hide_index=True,
-                height=min(30 * (len(display) + 1), _CRYPTO_TABLE_HEIGHT),
-                column_config=col_config,
-                on_select="rerun",
-                selection_mode="single-row",
-                key=key,
-            )
-
-        rise_tab, amount_tab = st.tabs(["📈 등락률", "💰 거래대금"])
-        picks = []
-
-        with rise_tab:
-            direction = st.radio("방향", ["상승", "하락"], horizontal=True)
-            ranked_rise = screener.top_movers(
-                universe, by="DailyChangeRatio", n=top_n, ascending=(direction == "하락")
-            )
-            st.caption(
-                f"{market_label} {len(universe):,}종목 중 24시간 {direction}률 상위 {len(ranked_rise)}개"
-            )
-            picks.append(
-                (
-                    "tbl_rise",
-                    ranked_rise,
-                    _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", "%.2f%%"),
-                )
-            )
-
-        with amount_tab:
-            ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
-            st.caption(f"{market_label} {len(universe):,}종목 중 24시간 거래대금 상위 {len(ranked_amount)}개")
-            picks.append(
-                (
-                    "tbl_amount",
-                    ranked_amount,
-                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
-                )
-            )
-    elif is_us:
-        us_top1, _us_spacer, us_top2, us_top3 = st.columns([2, 3, 2.4, 0.9])
-        with us_top1:
+        if is_crypto:
             top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
-        with us_top2:
-            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
-            st.checkbox("원화(₩)로 표기", key="us_show_krw")
-        with us_top3:
-            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
             if st.button("🔄", help="새로고침 (캐시 초기화)"):
                 st.cache_data.clear()
                 st.rerun()
 
-        _unit, _usd_rate, _ = _us_currency_state()
-        if st.session_state.get("us_show_krw") and _unit == "$":
-            st.caption("⚠️ 환율 정보를 가져오지 못해 달러로 표시합니다.")
-        _px_fmt = "%,.0f원" if _unit == "원" else "$%,.2f"
-        _big_fmt = "%,.0f억원" if _unit == "원" else "$%,.2fB"
-        _big_scale = 1e8 if _unit == "원" else 1e9
+            try:
+                universe = _crypto_screen()
+            except Exception as e:
+                st.error(f"코인 시세를 불러오지 못했습니다: {e}")
+                st.stop()
 
-        try:
-            universe = _us_screen()
-        except Exception as e:
-            st.error(f"해외증시 시세를 불러오지 못했습니다: {e}")
-            st.stop()
+            market_label = "업비트 KRW"
 
-        market_label = "NASDAQ"
-
-        def _render_table(ranked, key, value_col, value_label, *, is_pct=False):
-            display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
-            display["종가"] = display["종가"] * _usd_rate
-            if is_pct:
-                display[value_label] = ranked[value_col]
-                value_fmt = "%.2f%%"
-            else:
-                display[value_label] = ranked[value_col] * _usd_rate / _big_scale
-                value_fmt = _big_fmt
-            col_config = {
-                "종가": st.column_config.NumberColumn(format=_px_fmt),
-                value_label: st.column_config.NumberColumn(format=value_fmt),
-            }
-            return st.dataframe(
-                display[["종목명", "종가", value_label]],
-                width="stretch",
-                hide_index=True,
-                height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
-                column_config=col_config,
-                on_select="rerun",
-                selection_mode="single-row",
-                key=key,
-            )
-
-        rise_tab, amount_tab, marcap_tab = st.tabs(["📈 등락률", "💰 거래대금", "🏢 시가총액"])
-        picks = []
-
-        with rise_tab:
-            direction = st.radio("방향", ["상승", "하락"], horizontal=True)
-            ranked_rise = screener.top_movers(
-                universe, by="DailyChangeRatio", n=top_n, ascending=(direction == "하락")
-            )
-            st.caption(
-                f"{market_label} {len(universe):,}종목 중 당일 {direction}률 상위 {len(ranked_rise)}개"
-            )
-            picks.append(
-                (
-                    "tbl_rise",
-                    ranked_rise,
-                    _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", is_pct=True),
+            def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
+                display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
+                display[value_label] = ranked[value_col] / scale
+                col_config = {
+                    "종가": st.column_config.NumberColumn(format="%,.0f원"),
+                    value_label: st.column_config.NumberColumn(format=fmt),
+                }
+                return st.dataframe(
+                    display[["종목명", "종가", value_label]],
+                    width="stretch",
+                    hide_index=True,
+                    height=min(30 * (len(display) + 1), _CRYPTO_TABLE_HEIGHT),
+                    column_config=col_config,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=key,
                 )
-            )
 
-        with amount_tab:
-            ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
-            st.caption(f"{market_label} {len(universe):,}종목 중 거래대금(근사) 상위 {len(ranked_amount)}개")
-            picks.append(
-                (
-                    "tbl_amount",
-                    ranked_amount,
-                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금"),
+            rise_tab, amount_tab = st.tabs(["📈 등락률", "💰 거래대금"])
+            picks = []
+
+            with rise_tab:
+                direction = st.selectbox("방향", ["상승", "하락"])
+                ranked_rise = screener.top_movers(
+                    universe, by="DailyChangeRatio", n=top_n, ascending=(direction == "하락")
                 )
-            )
-
-        with marcap_tab:
-            ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
-            st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
-            picks.append(
-                (
-                    "tbl_marcap",
-                    ranked_marcap,
-                    _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액"),
+                st.caption(
+                    f"{market_label} {len(universe):,}종목 중 24시간 {direction}률 상위 {len(ranked_rise)}개"
                 )
-            )
-    else:
-        fc1, fc2 = st.columns(2)
-        with fc1:
-            market = st.selectbox(
-                "시장",
-                ["ALL", "KOSPI", "KOSDAQ"],
-                format_func=lambda m: {"ALL": "전체", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}[m],
-            )
-        with fc2:
-            top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
-
-        fc3, fc4, fc5 = st.columns([1.3, 1.3, 0.6])
-        with fc3:
-            min_marcap_eok = st.selectbox(
-                "최소 시총",
-                [0, 100, 300, 500, 1000, 3000],
-                index=2,
-                format_func=lambda v: f"{v}억+" if v else "시총 전체",
-            )
-        with fc4:
-            min_volume = st.selectbox(
-                "최소 거래량",
-                [0, 1000, 5000, 10000, 50000],
-                index=1,
-                format_func=lambda v: f"{v:,}주+" if v else "거래량 전체",
-            )
-        with fc5:
-            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
-            if st.button("🔄", help="새로고침 (캐시 초기화)"):
-                st.cache_data.clear()
-                dl.clear_cache()
-                st.rerun()
-
-        try:
-            universe = _screen(market, 7, min_marcap_eok * 1e8, float(min_volume))
-        except Exception as e:
-            st.error(f"스크리닝 데이터를 불러오지 못했습니다: {e}")
-            st.stop()
-
-        market_label = "KOSPI+KOSDAQ" if market == "ALL" else market
-
-        def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
-            display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
-            display[value_label] = ranked[value_col] / scale
-            col_config = {
-                "종가": st.column_config.NumberColumn(format="%,d원"),
-                value_label: st.column_config.NumberColumn(format=fmt),
-            }
-            return st.dataframe(
-                display[["종목명", "종가", value_label]],
-                width="stretch",
-                hide_index=True,
-                height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
-                column_config=col_config,
-                on_select="rerun",
-                selection_mode="single-row",
-                key=key,
-            )
-
-        rise_tab, amount_tab, marcap_tab = st.tabs(["📈 상승률", "💰 거래대금", "🏢 시가총액"])
-        picks = []
-
-        with rise_tab:
-            c1, c2 = st.columns(2)
-            with c1:
-                basis = st.radio("기준", ["일간", "주간", "월간"], horizontal=True)
-            with c2:
-                direction = st.radio("방향", ["상승", "하락"], horizontal=True)
-            basis_col = {
-                "일간": "DailyChangeRatio",
-                "주간": "WeeklyChangeRatio",
-                "월간": "MonthlyChangeRatio",
-            }[basis]
-            ranked_rise = screener.top_movers(
-                universe, by=basis_col, n=top_n, ascending=(direction == "하락")
-            )
-            st.caption(
-                f"{market_label} {len(universe):,}종목 중 {basis} {direction}률 상위 {len(ranked_rise)}개"
-            )
-            picks.append(
-                (
-                    "tbl_rise",
-                    ranked_rise,
-                    _render_table(ranked_rise, "tbl_rise", basis_col, f"{basis}%", "%.2f%%"),
+                picks.append(
+                    (
+                        "tbl_rise",
+                        ranked_rise,
+                        _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", "%.2f%%"),
+                    )
                 )
-            )
 
-        with amount_tab:
-            ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
-            st.caption(f"{market_label} {len(universe):,}종목 중 거래대금 상위 {len(ranked_amount)}개")
-            picks.append(
-                (
-                    "tbl_amount",
-                    ranked_amount,
-                    _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
+            with amount_tab:
+                ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+                st.caption(f"{market_label} {len(universe):,}종목 중 24시간 거래대금 상위 {len(ranked_amount)}개")
+                picks.append(
+                    (
+                        "tbl_amount",
+                        ranked_amount,
+                        _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
+                    )
                 )
+        elif is_us:
+            us_top1, _us_spacer, us_top2, us_top3 = st.columns(
+                [2, 3, 2.4, 0.9], vertical_alignment="bottom"
             )
+            with us_top1:
+                top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
+            with us_top2:
+                st.checkbox("원화(₩)로 표기", key="us_show_krw")
+            with us_top3:
+                if st.button("🔄", help="새로고침 (캐시 초기화)"):
+                    st.cache_data.clear()
+                    st.rerun()
 
-        with marcap_tab:
-            ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
-            st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
-            picks.append(
-                (
-                    "tbl_marcap",
-                    ranked_marcap,
-                    _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액", "%,.0f억원", scale=1e8),
+            _unit, _usd_rate, _ = _us_currency_state()
+            if st.session_state.get("us_show_krw") and _unit == "$":
+                st.caption("⚠️ 환율 정보를 가져오지 못해 달러로 표시합니다.")
+            _px_fmt = "%,.0f원" if _unit == "원" else "$%,.2f"
+            _big_fmt = "%,.0f억원" if _unit == "원" else "$%,.2fB"
+            _big_scale = 1e8 if _unit == "원" else 1e9
+
+            try:
+                universe = _us_screen()
+            except Exception as e:
+                st.error(f"해외증시 시세를 불러오지 못했습니다: {e}")
+                st.stop()
+
+            market_label = "NASDAQ"
+
+            def _render_table(ranked, key, value_col, value_label, *, is_pct=False):
+                display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
+                display["종가"] = display["종가"] * _usd_rate
+                if is_pct:
+                    display[value_label] = ranked[value_col]
+                    value_fmt = "%.2f%%"
+                else:
+                    display[value_label] = ranked[value_col] * _usd_rate / _big_scale
+                    value_fmt = _big_fmt
+                col_config = {
+                    "종가": st.column_config.NumberColumn(format=_px_fmt),
+                    value_label: st.column_config.NumberColumn(format=value_fmt),
+                }
+                return st.dataframe(
+                    display[["종목명", "종가", value_label]],
+                    width="stretch",
+                    hide_index=True,
+                    height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
+                    column_config=col_config,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=key,
                 )
-            )
 
-    # 시장 전환 시 이전 선택이 다른 시장 코드로 남아있으면 안 되므로, 선택 상태를 시장별로 분리해 둔다.
-    _sel_code_key = (
-        "selected_code_crypto" if is_crypto else "selected_code_us" if is_us else "selected_code_stock"
-    )
-    _sel_name_key = (
-        "selected_name_crypto" if is_crypto else "selected_name_us" if is_us else "selected_name_stock"
-    )
+            rise_tab, amount_tab, marcap_tab = st.tabs(["📈 등락률", "💰 거래대금", "🏢 시가총액"])
+            picks = []
 
-    for tbl_key, ranked_df, event in picks:
-        if not event.selection.rows:
-            continue
-        picked = ranked_df.iloc[event.selection.rows[0]]
-        if st.session_state.get(f"_last_{tbl_key}_{market_type}") != picked["Code"]:
-            st.session_state[f"_last_{tbl_key}_{market_type}"] = picked["Code"]
-            st.session_state[_sel_code_key] = picked["Code"]
-            st.session_state[_sel_name_key] = picked["Name"]
+            with rise_tab:
+                direction = st.selectbox("방향", ["상승", "하락"])
+                ranked_rise = screener.top_movers(
+                    universe, by="DailyChangeRatio", n=top_n, ascending=(direction == "하락")
+                )
+                st.caption(
+                    f"{market_label} {len(universe):,}종목 중 당일 {direction}률 상위 {len(ranked_rise)}개"
+                )
+                picks.append(
+                    (
+                        "tbl_rise",
+                        ranked_rise,
+                        _render_table(ranked_rise, "tbl_rise", "DailyChangeRatio", "등락%", is_pct=True),
+                    )
+                )
+
+            with amount_tab:
+                ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+                st.caption(f"{market_label} {len(universe):,}종목 중 거래대금(근사) 상위 {len(ranked_amount)}개")
+                picks.append(
+                    (
+                        "tbl_amount",
+                        ranked_amount,
+                        _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금"),
+                    )
+                )
+
+            with marcap_tab:
+                ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
+                st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
+                picks.append(
+                    (
+                        "tbl_marcap",
+                        ranked_marcap,
+                        _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액"),
+                    )
+                )
+        else:
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                market = st.selectbox(
+                    "시장",
+                    ["ALL", "KOSPI", "KOSDAQ"],
+                    format_func=lambda m: {"ALL": "전체", "KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}[m],
+                )
+            with fc2:
+                top_n = st.selectbox("표시개수", [10, 20, 30, 50, 100], index=2)
+
+            fc3, fc4, fc5 = st.columns([1.3, 1.3, 0.6], vertical_alignment="bottom")
+            with fc3:
+                min_marcap_eok = st.selectbox(
+                    "최소 시총",
+                    [0, 100, 300, 500, 1000, 3000],
+                    index=2,
+                    format_func=lambda v: f"{v}억+" if v else "시총 전체",
+                )
+            with fc4:
+                min_volume = st.selectbox(
+                    "최소 거래량",
+                    [0, 1000, 5000, 10000, 50000],
+                    index=1,
+                    format_func=lambda v: f"{v:,}주+" if v else "거래량 전체",
+                )
+            with fc5:
+                if st.button("🔄", help="새로고침 (캐시 초기화)"):
+                    st.cache_data.clear()
+                    dl.clear_cache()
+                    st.rerun()
+
+            try:
+                universe = _screen(market, 7, min_marcap_eok * 1e8, float(min_volume))
+            except Exception as e:
+                st.error(f"스크리닝 데이터를 불러오지 못했습니다: {e}")
+                st.stop()
+
+            market_label = "KOSPI+KOSDAQ" if market == "ALL" else market
+
+            def _render_table(ranked, key, value_col, value_label, fmt, scale=1.0):
+                display = ranked.rename(columns={"Name": "종목명", "Close": "종가"}).copy()
+                display[value_label] = ranked[value_col] / scale
+                col_config = {
+                    "종가": st.column_config.NumberColumn(format="%,d원"),
+                    value_label: st.column_config.NumberColumn(format=fmt),
+                }
+                return st.dataframe(
+                    display[["종목명", "종가", value_label]],
+                    width="stretch",
+                    hide_index=True,
+                    height=min(30 * (len(display) + 1), _STOCK_TABLE_HEIGHT),
+                    column_config=col_config,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=key,
+                )
+
+            rise_tab, amount_tab, marcap_tab = st.tabs(["📈 상승률", "💰 거래대금", "🏢 시가총액"])
+            picks = []
+
+            with rise_tab:
+                c1, c2 = st.columns(2)
+                with c1:
+                    basis = st.selectbox("기준", ["일간", "주간", "월간"])
+                with c2:
+                    direction = st.selectbox("방향", ["상승", "하락"])
+                basis_col = {
+                    "일간": "DailyChangeRatio",
+                    "주간": "WeeklyChangeRatio",
+                    "월간": "MonthlyChangeRatio",
+                }[basis]
+                ranked_rise = screener.top_movers(
+                    universe, by=basis_col, n=top_n, ascending=(direction == "하락")
+                )
+                st.caption(
+                    f"{market_label} {len(universe):,}종목 중 {basis} {direction}률 상위 {len(ranked_rise)}개"
+                )
+                picks.append(
+                    (
+                        "tbl_rise",
+                        ranked_rise,
+                        _render_table(ranked_rise, "tbl_rise", basis_col, f"{basis}%", "%.2f%%"),
+                    )
+                )
+
+            with amount_tab:
+                ranked_amount = screener.top_movers(universe, by="Amount", n=top_n, ascending=False)
+                st.caption(f"{market_label} {len(universe):,}종목 중 거래대금 상위 {len(ranked_amount)}개")
+                picks.append(
+                    (
+                        "tbl_amount",
+                        ranked_amount,
+                        _render_table(ranked_amount, "tbl_amount", "Amount", "거래대금", "%,.0f억원", scale=1e8),
+                    )
+                )
+
+            with marcap_tab:
+                ranked_marcap = screener.top_movers(universe, by="Marcap", n=top_n, ascending=False)
+                st.caption(f"{market_label} {len(universe):,}종목 중 시가총액 상위 {len(ranked_marcap)}개")
+                picks.append(
+                    (
+                        "tbl_marcap",
+                        ranked_marcap,
+                        _render_table(ranked_marcap, "tbl_marcap", "Marcap", "시가총액", "%,.0f억원", scale=1e8),
+                    )
+                )
+
+        # 시장 전환 시 이전 선택이 다른 시장 코드로 남아있으면 안 되므로, 선택 상태를 시장별로 분리해 둔다.
+        _sel_code_key = (
+            "selected_code_crypto" if is_crypto else "selected_code_us" if is_us else "selected_code_stock"
+        )
+        _sel_name_key = (
+            "selected_name_crypto" if is_crypto else "selected_name_us" if is_us else "selected_name_stock"
+        )
+
+        for tbl_key, ranked_df, event in picks:
+            if not event.selection.rows:
+                continue
+            picked = ranked_df.iloc[event.selection.rows[0]]
+            if st.session_state.get(f"_last_{tbl_key}_{market_type}") != picked["Code"]:
+                st.session_state[f"_last_{tbl_key}_{market_type}"] = picked["Code"]
+                st.session_state[_sel_code_key] = picked["Code"]
+                st.session_state[_sel_name_key] = picked["Name"]
 
 # ==================================================================== 우측 상단: 종목 상세
 with right_col:
-    with st.container(key="detail", border=True, height=_TOP_ROW_HEIGHT):
-        selected_code = st.session_state.get(_sel_code_key)
-        selected_name = st.session_state.get(_sel_name_key, "")
+    selected_code = st.session_state.get(_sel_code_key)
+    selected_name = st.session_state.get(_sel_name_key, "")
 
-        _detail_title = "🌎 해외증시 상세" if is_us else "🪙 코인 상세" if is_crypto else "📈 종목 상세"
-        if selected_code:
-            _detail_title += f" · {selected_name}"
-        _section_title(_detail_title)
+    _detail_title = "🌎 해외증시 상세" if is_us else "🪙 코인 상세" if is_crypto else "📈 종목 상세"
+    if selected_code:
+        _detail_title += f" · {selected_name}"
+    _section_title(_detail_title)
+    with st.container(key="detail", border=True, height=_TOP_ROW_HEIGHT):
 
         search_col, period_col, bar_col, idx_col = st.columns([2, 1, 1, 2])
         with search_col:
@@ -584,19 +568,25 @@ with right_col:
             else:
                 idx_sel = st.multiselect("지수 비교", list(config.INDICES.keys()), default=["KOSPI"])
 
-        if manual.strip():
+        # 자동완성 최소 글자수 — 숫자(종목코드)는 3자, 문자(종목명)는 2자부터 목록을 보여준다.
+        # 너무 짧은 입력(1글자 등)에서 바로 검색하면 결과가 너무 많아 오히려 고르기 어렵다.
+        query = manual.strip()
+        _autocomplete_min_len = 3 if query.isdigit() else 2
+        if query and len(query) < _autocomplete_min_len:
+            st.caption(f"{_autocomplete_min_len}글자 이상 입력하면 자동완성 목록이 나타납니다.")
+        elif query:
             if is_crypto:
-                hits = crypto_loader.find_symbol(manual.strip())
+                hits = crypto_loader.find_symbol(query)
             elif is_us:
-                hits = dl.find_symbol(manual.strip(), market="NASDAQ")
+                hits = dl.find_symbol(query, market="NASDAQ")
             else:
-                hits = dl.find_symbol(manual.strip())
+                hits = dl.find_symbol(query)
             code_col = "Code" if "Code" in hits.columns else "Symbol"
             if not hits.empty:
                 options = {
                     f"{row[code_col]} · {row['Name']}": row[code_col] for _, row in hits.head(20).iterrows()
                 }
-                pick = st.selectbox("검색 결과", list(options.keys()))
+                pick = st.selectbox(f"자동완성 ({len(options)}건)", list(options.keys()))
                 selected_code = options[pick]
                 selected_name = pick.split(" · ", 1)[1]
             else:
@@ -655,28 +645,49 @@ with right_col:
 
         _unit, _usd_rate, _decimals = _us_currency_state()
 
-        _r1 = st.columns(8)
-        _r1[0].metric("현재가", _money(_close, unit=_unit, usd_rate=_usd_rate))
-        if _prev_close:
-            _diff = _close - _prev_close
-            _r1[0].markdown(
-                _change_html(
-                    _diff, _diff / _prev_close * 100, unit=_unit, decimals=_decimals, usd_rate=_usd_rate
-                ),
-                unsafe_allow_html=True,
+        # 시세 요약 8개 항목(현재가~거래대금)은 컬럼 하나가 85px 안팎이라, 거래량·거래대금처럼
+        # 자릿수가 큰 값(예: "12,765,756주")은 전역 stMetricValue 폰트 크기(1.25rem)로는
+        # 글자가 넘쳐 "..."로 잘렸다(실측 확인: 필요 폭 109px > 가용 85px). 이 행에만
+        # 적용되는 스코프 CSS로 폰트를 줄이고 컬럼 사이 여백도 좁혀 실제 가용 폭을 넓힌다.
+        st.markdown(
+            """
+<style>
+.st-key-price_summary [data-testid="stMetricValue"] p {
+    font-size: 0.86rem !important;
+    line-height: 1.3 !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: nowrap !important;
+}
+.st-key-price_summary [data-testid="stMetricLabel"] p {font-size: 0.74rem !important;}
+.st-key-price_summary div[data-testid="stHorizontalBlock"] {gap: 0.3rem !important;}
+</style>
+""",
+            unsafe_allow_html=True,
+        )
+        with st.container(key="price_summary"):
+            _r1 = st.columns(8)
+            _r1[0].metric("현재가", _money(_close, unit=_unit, usd_rate=_usd_rate))
+            if _prev_close:
+                _diff = _close - _prev_close
+                _r1[0].markdown(
+                    _change_html(
+                        _diff, _diff / _prev_close * 100, unit=_unit, decimals=_decimals, usd_rate=_usd_rate
+                    ),
+                    unsafe_allow_html=True,
+                )
+            _r1[1].metric("시가", _money(float(_last["Open"]), unit=_unit, usd_rate=_usd_rate))
+            _r1[2].metric("고가", _money(float(_last["High"]), unit=_unit, usd_rate=_usd_rate))
+            _r1[3].metric("저가", _money(float(_last["Low"]), unit=_unit, usd_rate=_usd_rate))
+            _r1[4].metric("전일종가", _money(_prev_close, unit=_unit, usd_rate=_usd_rate) if _prev_close else "—")
+            _r1[5].metric(
+                "변동폭", _money(float(_last["High"]) - float(_last["Low"]), unit=_unit, usd_rate=_usd_rate)
             )
-        _r1[1].metric("시가", _money(float(_last["Open"]), unit=_unit, usd_rate=_usd_rate))
-        _r1[2].metric("고가", _money(float(_last["High"]), unit=_unit, usd_rate=_usd_rate))
-        _r1[3].metric("저가", _money(float(_last["Low"]), unit=_unit, usd_rate=_usd_rate))
-        _r1[4].metric("전일종가", _money(_prev_close, unit=_unit, usd_rate=_usd_rate) if _prev_close else "—")
-        _r1[5].metric(
-            "변동폭", _money(float(_last["High"]) - float(_last["Low"]), unit=_unit, usd_rate=_usd_rate)
-        )
-        _r1[6].metric("거래량", f"{_vol_fmt}{_vol_unit}")
-        _r1[7].metric(
-            "거래대금" if not is_crypto else "24H 거래대금",
-            _big_money(_amount, unit=_unit, usd_rate=_usd_rate),
-        )
+            _r1[6].metric("거래량", f"{_vol_fmt}{_vol_unit}")
+            _r1[7].metric(
+                "거래대금" if not is_crypto else "24H 거래대금",
+                _big_money(_amount, unit=_unit, usd_rate=_usd_rate),
+            )
 
         _notes = [f"{_last_date:%Y-%m-%d (%a)} 기준"]
         if _marcap:
@@ -689,7 +700,7 @@ with right_col:
             _notes.append("거래대금 추정치")
         elif _amount_stale:
             _notes.append("거래대금·시총은 KRX 스냅샷 기준")
-        _notes.append("상승=빨강 / 하락=파랑")
+        _notes.append("상승=초록 / 하락=빨강")
         st.caption(" · ".join(_notes))
 
         # 봉 주기: 시세 요약·예측은 항상 price_df(일봉)를 쓰고, 차트만 바꾼다 —
@@ -713,7 +724,9 @@ with right_col:
         # 컬럼을 잘게 쪼갤수록(예전엔 체크박스 10개를 한 줄에) 좁은 화면에서 Streamlit이
         # 모바일 스택 레이아웃으로 전환해버려서 PC 화면 비율이 세로로 길게 깨졌다 —
         # 개별 체크박스 대신 멀티셀렉트로 묶어서 한 줄당 컬럼 수를 4개로 줄였다.
-        ma_col, ind_col, ctype_col, log_col = st.columns([1.5, 2.1, 1.3, 0.9])
+        ma_col, ind_col, ctype_col, log_col = st.columns(
+            [1.5, 2.1, 1.3, 0.9], vertical_alignment="bottom"
+        )
         with ma_col:
             ma_sel = st.multiselect("이동평균", SMA_CHOICES, default=[20, 60])
         with ind_col:
@@ -725,7 +738,6 @@ with right_col:
         with ctype_col:
             chart_type_label = st.selectbox("차트 유형", _CHART_TYPES, index=0)
         with log_col:
-            st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
             log_y = st.checkbox("로그축", value=False)
 
         show_bb = "볼린저밴드" in ind_sel
@@ -768,30 +780,88 @@ with right_col:
             if not idx_df.empty:
                 overlays[label] = idx_df["Close"]
 
-        fig = charts.build_chart(
-            chart_source,
-            title="",
-            sma_windows=tuple(sma_windows),
-            show_bollinger=show_bb,
-            show_volume=show_vol,
-            show_rsi=show_rsi,
-            show_macd=show_macd,
-            index_overlays=overlays or None,
-            base_height=320,
-            panel_height=85,
-            chart_type=chart_type,
-            show_rangeselector=True,
-            log_y=log_y,
-            show_stochastic=show_stoch,
-            show_ichimoku=show_ichimoku,
-            volume_profile=vp_df,
-            crosshair=True,
-            drag_pan=True,
-            drawing_tools=True,
-        )
-        # scrollZoom은 Figure 속성이 아니라 렌더링 옵션이라 여기서 켠다 — 업비트처럼
-        # 마우스 휠로 확대/축소, 드래그로 이동(위 drag_pan=True)하는 조작감을 맞춘다.
-        st.plotly_chart(fig, width="stretch", config={"scrollZoom": True})
+        _extra_indicator_rows = int(show_rsi) + int(show_stoch) + int(show_macd)
+
+        if show_vol:
+            # 가격·거래량은 각각 독립된 Plotly 컴포넌트로 그려서 그 사이 경계를 마우스
+            # 드래그로 위아래 리사이즈할 수 있게 한다(resizable_chart.py 참고) — Plotly
+            # make_subplots 자체는 서브플롯 행 높이를 드래그로 바꾸는 기능이 없어서, 하나로
+            # 합쳐 그리던 기존 방식(가격+거래량+RSI...을 한 Figure에 고정 비율로 배치)으로는
+            # 이 기능을 만들 수 없었다.
+            price_fig = charts.build_chart(
+                chart_source,
+                title="",
+                sma_windows=tuple(sma_windows),
+                show_bollinger=show_bb,
+                show_volume=False,
+                chart_type=chart_type,
+                show_rangeselector=True,
+                log_y=log_y,
+                show_ichimoku=show_ichimoku,
+                index_overlays=overlays or None,
+                base_height=320,
+                panel_height=0,
+                volume_profile=vp_df,
+                crosshair=True,
+                drag_pan=True,
+                drawing_tools=True,
+                up_color=UP_COLOR,
+                down_color=DOWN_COLOR,
+            )
+            volume_fig = charts.build_volume_chart(
+                chart_source, up_color=UP_COLOR, down_color=DOWN_COLOR, crosshair=True, height=110
+            )
+            extra_fig = None
+            if _extra_indicator_rows:
+                extra_fig = charts.build_chart(
+                    chart_source,
+                    title="",
+                    include_price=False,
+                    show_volume=False,
+                    show_rsi=show_rsi,
+                    show_stochastic=show_stoch,
+                    show_macd=show_macd,
+                    crosshair=True,
+                    base_height=85,
+                    panel_height=85,
+                    up_color=UP_COLOR,
+                    down_color=DOWN_COLOR,
+                )
+            resizable_chart.render(
+                price_fig,
+                volume_fig,
+                extra_fig,
+                price_height=320,
+                volume_height=110,
+                extra_height=85 * _extra_indicator_rows,
+            )
+        else:
+            fig = charts.build_chart(
+                chart_source,
+                title="",
+                sma_windows=tuple(sma_windows),
+                show_bollinger=show_bb,
+                show_volume=False,
+                show_rsi=show_rsi,
+                show_macd=show_macd,
+                index_overlays=overlays or None,
+                base_height=320,
+                panel_height=85,
+                chart_type=chart_type,
+                show_rangeselector=True,
+                log_y=log_y,
+                show_stochastic=show_stoch,
+                show_ichimoku=show_ichimoku,
+                volume_profile=vp_df,
+                crosshair=True,
+                drag_pan=True,
+                drawing_tools=True,
+                up_color=UP_COLOR,
+                down_color=DOWN_COLOR,
+            )
+            # scrollZoom은 Figure 속성이 아니라 렌더링 옵션이라 여기서 켠다 — 업비트처럼
+            # 마우스 휠로 확대/축소, 드래그로 이동(위 drag_pan=True)하는 조작감을 맞춘다.
+            st.plotly_chart(fig, width="stretch", config={"scrollZoom": True})
 
         summary = ind.summary(price_df["Close"])
         m1, m2, m3, m4, m5 = st.columns(5)
@@ -801,56 +871,48 @@ with right_col:
         m4.metric("샤프", f"{summary['sharpe']:.2f}")
         m5.metric("MDD", f"{summary['max_drawdown'] * 100:.1f}%")
 
-_HORIZON_PRESETS = (5, 15, 30)
+_HORIZON_PRESETS = (1, 5, 15, 30, 60, 90)
 
 
-def _apply_horizon_preset(preset: int) -> None:
-    """체크박스가 방금 체크됐을 때만(체크 해제 시엔 무시) 입력값을 그 값으로 맞추고,
-    나머지 프리셋 체크박스는 꺼서 라디오처럼 하나만 선택된 것처럼 보이게 한다."""
-    if st.session_state.get(f"horizon_preset_{preset}"):
-        st.session_state["custom_horizon"] = preset
-        for other in _HORIZON_PRESETS:
-            if other != preset:
-                st.session_state[f"horizon_preset_{other}"] = False
+def _apply_horizon_preset() -> None:
+    """프리셋 드롭다운에서 고른 값을 "거래일 수" 입력값에 그대로 반영한다."""
+    st.session_state["custom_horizon"] = st.session_state["horizon_preset"]
 
 
 # ==================================================================== 좌측 하단: 가격 예측
-with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGHT):
+with left_col:
     _section_title("💹 가격 예측")
-    st.caption(
-        "⚠️ 참고용 추정치이며 투자 조언이 아닙니다. Ridge/RandomForest/GradientBoosting을 "
-        "시계열 교차검증으로 비교한 모델로 예측합니다(보유한 전체 기간 데이터 사용)."
-    )
+    with st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGHT):
+        st.caption("⚠️ 참고용 추정치이며 투자 조언이 아닙니다. 과거 시세 흐름을 바탕으로 자동 계산한 값입니다.")
 
-    try:
-        if is_crypto or is_us:
-            # 코인·해외증시 둘 다 종목코드 기반 뉴스 소스가 없어 종목명 키워드 검색(crypto_news)을 공유 재사용한다.
-            news.log_sentiment_from_news(selected_code, _crypto_news(selected_name, 10))
-        else:
-            news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
-    except Exception:
-        pass
+        try:
+            if is_crypto or is_us:
+                # 코인·해외증시 둘 다 종목코드 기반 뉴스 소스가 없어 종목명 키워드 검색(crypto_news)을 공유 재사용한다.
+                news.log_sentiment_from_news(selected_code, _crypto_news(selected_name, 10))
+            else:
+                news.log_sentiment_from_news(selected_code, _news(selected_code, 10))
+        except Exception:
+            pass
 
-    st.markdown("**몇 거래일 후를 예측할까요?**")
-    pcols = st.columns(len(_HORIZON_PRESETS))
-    for col, preset in zip(pcols, _HORIZON_PRESETS, strict=True):
-        with col:
-            st.checkbox(
-                f"{preset}일",
-                key=f"horizon_preset_{preset}",
-                on_change=_apply_horizon_preset,
-                args=(preset,),
-            )
+        st.session_state.setdefault("custom_horizon", 5)
+        st.selectbox(
+            "몇 거래일 후를 예측할까요?",
+            _HORIZON_PRESETS,
+            index=_HORIZON_PRESETS.index(5),
+            format_func=lambda d: f"{d}일",
+            key="horizon_preset",
+            on_change=_apply_horizon_preset,
+        )
 
-    st.session_state.setdefault("custom_horizon", 5)
-    hcol1, hcol2 = st.columns([2, 1])
-    with hcol1:
-        st.number_input("거래일 수", min_value=1, max_value=60, step=1, key="custom_horizon")
-    with hcol2:
-        st.markdown("<div style='height:1.55em'></div>", unsafe_allow_html=True)
-        if st.button("조회", key="custom_horizon_query"):
+        hcol1, hcol2 = st.columns([2, 1], vertical_alignment="bottom")
+        with hcol1:
+            st.number_input("거래일 수", min_value=1, max_value=90, step=1, key="custom_horizon")
+        with hcol2:
+            query_clicked = st.button("조회", key="custom_horizon_query")
+
+        if query_clicked:
             horizon = int(st.session_state["custom_horizon"])
-            with st.spinner("여러 모델을 교차검증하며 심층 학습하는 중..."):
+            with st.spinner("여러 예측 방식을 비교하며 계산하는 중..."):
                 full_price_df = (
                     _crypto_price(selected_code, config.DEFAULT_START)
                     if is_crypto
@@ -865,121 +927,127 @@ with left_col, st.container(key="predict", border=True, height=_BOTTOM_ROW_HEIGH
                     ),
                 }
 
-    adv_pred = st.session_state.get("adv_pred")
-    if adv_pred and adv_pred["code"] == selected_code:
-        horizon = adv_pred["horizon"]
-        pred = adv_pred["result"]
-        st.markdown(f"**{horizon}거래일 후 예측**")
-        if "error" in pred:
-            st.info(pred["error"])
-        else:
-            _pred_unit, _pred_rate, _pred_decimals = _us_currency_state()
-            pred_col, info_col = st.columns([1, 1])
-            with pred_col:
-                st.metric(
-                    pred["target_date"].strftime("%m-%d(%a)"),
-                    _money(pred["predicted_price"], unit=_pred_unit, usd_rate=_pred_rate),
-                )
-            with info_col:
-                st.markdown("<div style='height:0.35em'></div>", unsafe_allow_html=True)
+        adv_pred = st.session_state.get("adv_pred")
+        if adv_pred and adv_pred["code"] == selected_code:
+            horizon = adv_pred["horizon"]
+            pred = adv_pred["result"]
+            if "error" in pred:
+                st.info(pred["error"])
+            else:
+                _pred_unit, _pred_rate, _pred_decimals = _us_currency_state()
+                # 첫 줄: "N거래일 후 예측" 바로 오른쪽에 예측 금액을 나란히, 그 아래 줄 오른쪽에
+                # 등락(+금액/+%)을 이어 붙인다 — 박스 전체 너비를 쓰므로 컬럼으로 반씩 나누지
+                # 않는다(반으로 나누면 아래 세부 정보 줄이 줄바꿈된다).
                 st.markdown(
-                    _change_html(
+                    "<div style='display:flex;justify-content:space-between;align-items:baseline;'>"
+                    f"<span style='font-weight:700;'>{horizon}거래일 후 예측"
+                    f" ({pred['target_date'].strftime('%m-%d(%a)')})</span>"
+                    "<span style='font-size:1.35rem;font-weight:700;'>"
+                    f"{_money(pred['predicted_price'], unit=_pred_unit, usd_rate=_pred_rate)}</span>"
+                    "</div>"
+                    "<div style='text-align:right;'>"
+                    + _change_html(
                         pred["predicted_price"] - pred["last_close"],
                         pred["predicted_return"] * 100,
                         soft=True,
                         unit=_pred_unit,
                         decimals=_pred_decimals,
                         usd_rate=_pred_rate,
-                    ),
+                    )
+                    + "</div>",
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    f"{pred['best_model']} · 검증{pred['n_holdout']}일 · "
-                    f"MAE {_money(pred['mae'], unit=_pred_unit, usd_rate=_pred_rate)} · "
-                    f"MAPE {pred['mape'] * 100:.1f}% · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
+                    f"{_MODEL_LABELS.get(pred['best_model'], pred['best_model'])} 방식 · "
+                    f"최근 {pred['n_holdout']}일로 검증 · "
+                    f"평균 오차 {_money(pred['mae'], unit=_pred_unit, usd_rate=_pred_rate)}"
+                    f"({pred['mape'] * 100:.1f}%) · 방향적중 {pred['directional_accuracy'] * 100:.0f}%"
                 )
 
-            # ---------------------------------------------- 실제 추이(실선) + 예측 추이(대시선)
-            lookback = max(30, horizon * 5)  # 예측 기간에 비례해 과거 구간도 넉넉히 보여준다
-            hist = price_df.tail(lookback)
-            pred_color = (
-                UP_SOFT
-                if pred["predicted_price"] > pred["last_close"]
-                else DOWN_SOFT
-                if pred["predicted_price"] < pred["last_close"]
-                else FLAT_SOFT
-            )
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatter(x=hist.index, y=hist["Close"], name="실제", line=dict(width=1.8, color="#0ea5e9"))
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=[hist.index[-1], pred["target_date"]],
-                    y=[hist["Close"].iloc[-1], pred["predicted_price"]],
-                    name=f"{horizon}거래일 후 예측",
-                    line=dict(width=2, color=pred_color, dash="dash"),
+                # ---------------------------------------------- 실제 추이(실선) + 예측 추이(대시선)
+                lookback = max(30, horizon * 5)  # 예측 기간에 비례해 과거 구간도 넉넉히 보여준다
+                hist = price_df.tail(lookback)
+                pred_color = (
+                    UP_SOFT
+                    if pred["predicted_price"] > pred["last_close"]
+                    else DOWN_SOFT
+                    if pred["predicted_price"] < pred["last_close"]
+                    else FLAT_SOFT
                 )
-            )
-            fig.update_layout(
-                height=200,
-                margin=dict(l=10, r=10, t=10, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
-            st.plotly_chart(fig, width="stretch")
-            st.caption(
-                "예측선은 마지막 실제 종가와 예측값을 직선으로 이은 것으로, 그 사이의 실제 경로를 뜻하지 않습니다."
-            )
-
-            with st.expander("모델 상세 (교차검증 비교 · 피처 영향도)"):
-                st.markdown(
-                    f"선정: {pred['best_model']} · 학습 {pred['n_train']}행 / "
-                    f"홀드아웃 {pred['n_holdout']}행 · 뉴스 감성 히스토리 {pred['news_days']}일 누적"
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Scatter(x=hist.index, y=hist["Close"], name="실제", line=dict(width=1.8, color="#0ea5e9"))
                 )
-                cv_df = pd.DataFrame(
-                    {
-                        "모델": list(pred["cv_scores"].keys()),
-                        "교차검증 MAE(수익률)": list(pred["cv_scores"].values()),
-                    }
+                fig.add_trace(
+                    go.Scatter(
+                        x=[hist.index[-1], pred["target_date"]],
+                        y=[hist["Close"].iloc[-1], pred["predicted_price"]],
+                        name=f"{horizon}거래일 후 예측",
+                        line=dict(width=2, color=pred_color, dash="dash"),
+                    )
                 )
-                st.dataframe(cv_df, hide_index=True, width="stretch")
-                st.dataframe(
-                    pred["feature_importance"].rename(columns={"label": "설명", "coef": "중요도"})[
-                        ["설명", "중요도"]
-                    ],
-                    hide_index=True,
-                    width="stretch",
+                fig.update_layout(
+                    height=200,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 )
+                st.plotly_chart(fig, width="stretch")
                 st.caption(
-                    "교차검증 점수는 모델을 고르는 데만 쓰였고, 위 정확도는 모델 선정에 관여하지 않은 "
-                    "마지막 홀드아웃 구간 기준입니다. 중요도 값은 모델별로 계산 방식이 다릅니다"
-                    "(회귀계수 / 트리 중요도 / 순열 중요도)."
+                    "예측선은 마지막 실제 종가와 예측값을 직선으로 이은 것으로, 그 사이의 실제 경로를 뜻하지 않습니다."
                 )
-    else:
-        st.caption("거래일 수를 정하고 조회를 누르면 예측 결과가 여기 표시됩니다.")
+
+                with st.expander("📋 예측 상세 보기"):
+                    st.markdown(
+                        f"선택된 방식: **{_MODEL_LABELS.get(pred['best_model'], pred['best_model'])}** · "
+                        f"학습에 쓴 데이터 {pred['n_train']}일 · 검증 데이터 {pred['n_holdout']}일 · "
+                        f"참고한 뉴스 기록 {pred['news_days']}일"
+                    )
+                    cv_df = pd.DataFrame(
+                        {
+                            "예측 방식": [_MODEL_LABELS.get(m, m) for m in pred["cv_scores"]],
+                            "오차(작을수록 정확)": list(pred["cv_scores"].values()),
+                        }
+                    )
+                    st.dataframe(cv_df, hide_index=True, width="stretch")
+                    st.dataframe(
+                        pred["feature_importance"].rename(columns={"label": "설명", "coef": "영향도"})[
+                            ["설명", "영향도"]
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                    )
+                    st.caption(
+                        "위 정확도는 예측 방식을 고를 때 쓰지 않은 별도 기간으로 확인한 값입니다. "
+                        "아래 표는 예측에 영향을 많이 준 항목일수록 위쪽에 있습니다."
+                    )
+        else:
+            st.caption("거래일 수를 정하고 조회를 누르면 예측 결과가 여기 표시됩니다.")
 
 # ==================================================================== 우측 하단: 뉴스 & 공시
 with right_col:
+    _section_title("📰 뉴스" if (is_crypto or is_us) else "📰 뉴스 & 공시")
     with st.container(key="news", border=True, height=_BOTTOM_ROW_HEIGHT):
-        _section_title("📰 뉴스" if (is_crypto or is_us) else "📰 뉴스 & 공시")
 
-        tabs_col, count_col = st.columns([4, 1])
-        with tabs_col:
-            tab_labels = ["📰 뉴스"] if (is_crypto or is_us) else ["📰 뉴스", "📋 공시 (DART)"]
-            tabs = st.tabs(tab_labels)
-            news_tab = tabs[0]
-            dart_tab = tabs[1] if len(tabs) > 1 else None
-        with count_col:
-            news_n = st.selectbox(
-                "표시개수",
-                [5, 10, 15, 20],
-                index=1,
-                key="news_n",
-                label_visibility="collapsed",
-                help="뉴스 표시 개수",
-            )
+        # st.tabs()를 컬럼 안에 넣으면 그 컬럼 너비만큼만 차지해 내용(뉴스 카드)이 좁아진다
+        # (예전엔 표시개수 셀렉트박스를 옆에 두려고 [4,1] 컬럼 안에 tabs를 넣었더니 뉴스
+        # 제목·요약이 실제 배정된 탭 너비보다 훨씬 좁게 잘렸다). 탭은 "뉴스" 박스 전체
+        # 너비로 그리고, 표시개수 선택은 뉴스 탭 내부의 작은 우측 정렬 줄로 옮긴다.
+        tab_labels = ["📰 뉴스"] if (is_crypto or is_us) else ["📰 뉴스", "📋 공시 (DART)"]
+        tabs = st.tabs(tab_labels)
+        news_tab = tabs[0]
+        dart_tab = tabs[1] if len(tabs) > 1 else None
 
         with news_tab:
+            _hdr_l, hdr_r = st.columns([5, 1])
+            with hdr_r:
+                news_n = st.selectbox(
+                    "표시개수",
+                    [5, 10, 15, 20],
+                    index=1,
+                    key="news_n",
+                    label_visibility="collapsed",
+                    help="뉴스 표시 개수",
+                )
             news_df = (
                 _crypto_news(selected_name, news_n) if (is_crypto or is_us) else _news(selected_code, news_n)
             )

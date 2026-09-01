@@ -11,7 +11,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 _INDEX_COLORS = ["#f59e0b", "#10b981", "#8b5cf6", "#06b6d4", "#ec4899"]
-_UP, _DOWN = "#ef4444", "#3b82f6"  # 국내 관행: 상승=빨강, 하락=파랑
+# 상승/하락 기본색 — app.py(고정 배포, 국내 관행 상승=빨강/하락=파랑)와의 호환을 위해
+# 기본값은 그대로 두고, 다른 색을 쓰고 싶은 호출부(예: 바이낸스 배색을 쓰는
+# pages/모니터링.py)는 build_chart(up_color=..., down_color=...)로 덮어쓴다.
+_UP, _DOWN = "#ef4444", "#3b82f6"
 
 
 def _rebase(series: pd.Series, to_index: pd.DatetimeIndex, base_value: float) -> pd.Series:
@@ -54,6 +57,9 @@ def build_chart(
     drag_pan: bool = False,
     volume_profile: pd.DataFrame | None = None,
     drawing_tools: bool = False,
+    up_color: str = _UP,
+    down_color: str = _DOWN,
+    include_price: bool = True,
 ) -> go.Figure:
     """df: indicators.add_all()을 거친 OHLCV+지표 DataFrame (컬럼: Open/High/Low/Close/Volume/sma*/rsi14/macd/signal).
 
@@ -89,7 +95,7 @@ def build_chart(
     Streamlit이 다른 위젯 조작으로 스크립트를 재실행하면 사라진다 — relayout 이벤트를
     Python으로 되돌려받지 않는 한(추가 의존성 필요) 이건 이 방식의 근본적 한계다.
     """
-    panels = ["가격"]
+    panels = ["가격"] if include_price else []
     if show_volume:
         panels.append("거래량")
     if show_rsi:
@@ -102,7 +108,7 @@ def build_chart(
     rows = len(panels)
     raw_heights = [0.55] + [0.45 / (rows - 1)] * (rows - 1) if rows > 1 else [1.0]
 
-    has_vp = volume_profile is not None and not volume_profile.empty
+    has_vp = include_price and volume_profile is not None and not volume_profile.empty
     if has_vp:
         # 매물대는 시간축이 아니라 거래량 크기를 가로축으로 쓰는 완전히 다른 축이 필요해서,
         # 가격 패널 옆에 좁은 열을 하나 더 만든다(같은 행이라 y축은 shared_yaxes로 가격
@@ -140,138 +146,139 @@ def build_chart(
             subplot_titles=panels,
         )
 
-    if chart_type == "line":
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["Close"], name="종가", line=dict(width=1.6, color=_UP)),
-            row=1,
-            col=1,
-        )
-    else:
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df["Open"],
-                high=df["High"],
-                low=df["Low"],
-                close=df["Close"],
-                name="가격",
-                increasing_line_color=_UP,
-                decreasing_line_color=_DOWN,
-            ),
-            row=1,
-            col=1,
-        )
-
-    for w in sma_windows:
-        col = f"sma{w}"
-        if col in df.columns:
+    if include_price:
+        if chart_type == "line":
             fig.add_trace(
-                go.Scatter(x=df.index, y=df[col], name=f"SMA{w}", line=dict(width=1.3)),
+                go.Scatter(x=df.index, y=df["Close"], name="종가", line=dict(width=1.6, color=up_color)),
                 row=1,
                 col=1,
             )
-
-    if show_bollinger and {"upper", "lower"} <= set(df.columns):
-        band_color = "rgba(148,163,184,0.9)"
-        fig.add_trace(
-            go.Scatter(
-                x=df.index, y=df["upper"], name="BB 상단", line=dict(width=1, color=band_color, dash="dot")
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["lower"],
-                name="BB 하단",
-                line=dict(width=1, color=band_color, dash="dot"),
-                fill="tonexty",
-                fillcolor="rgba(148,163,184,0.12)",
-            ),
-            row=1,
-            col=1,
-        )
-
-    if show_ichimoku and {
-        "ichimoku_tenkan",
-        "ichimoku_kijun",
-        "ichimoku_senkou_a",
-        "ichimoku_senkou_b",
-    } <= set(df.columns):
-        fig.add_trace(
-            go.Scatter(
-                x=df.index, y=df["ichimoku_tenkan"], name="전환선", line=dict(width=1, color="#ef4444")
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df.index, y=df["ichimoku_kijun"], name="기준선", line=dict(width=1, color="#3b82f6")
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["ichimoku_senkou_a"],
-                name="선행스팬A",
-                line=dict(width=0.6, color="rgba(16,185,129,0.6)"),
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["ichimoku_senkou_b"],
-                name="선행스팬B",
-                line=dict(width=0.6, color="rgba(239,68,68,0.6)"),
-                fill="tonexty",
-                fillcolor="rgba(148,163,184,0.15)",
-            ),
-            row=1,
-            col=1,
-        )
-
-    if has_vp:
-        fig.add_trace(
-            go.Bar(
-                x=volume_profile["volume"],
-                y=volume_profile["price_mid"],
-                orientation="h",
-                marker_color="rgba(100,116,139,0.55)",
-                showlegend=False,
-                name="매물대",
-                width=(volume_profile["price_high"] - volume_profile["price_low"]) * 0.9,
-            ),
-            row=1,
-            col=2,
-        )
-        fig.update_xaxes(showticklabels=False, row=1, col=2)
-        fig.update_yaxes(showticklabels=False, row=1, col=2)
-
-    if index_overlays:
-        base = float(df["Close"].iloc[0])
-        for i, (label, series) in enumerate(index_overlays.items()):
-            rebased = _rebase(series, df.index, base)
+        else:
             fig.add_trace(
-                go.Scatter(
+                go.Candlestick(
                     x=df.index,
-                    y=rebased,
-                    name=f"{label} (비교)",
-                    line=dict(width=1.2, dash="dot", color=_INDEX_COLORS[i % len(_INDEX_COLORS)]),
+                    open=df["Open"],
+                    high=df["High"],
+                    low=df["Low"],
+                    close=df["Close"],
+                    name="가격",
+                    increasing_line_color=up_color,
+                    decreasing_line_color=down_color,
                 ),
                 row=1,
                 col=1,
             )
 
-    row = 1
+        for w in sma_windows:
+            col = f"sma{w}"
+            if col in df.columns:
+                fig.add_trace(
+                    go.Scatter(x=df.index, y=df[col], name=f"SMA{w}", line=dict(width=1.3)),
+                    row=1,
+                    col=1,
+                )
+
+        if show_bollinger and {"upper", "lower"} <= set(df.columns):
+            band_color = "rgba(148,163,184,0.9)"
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index, y=df["upper"], name="BB 상단", line=dict(width=1, color=band_color, dash="dot")
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["lower"],
+                    name="BB 하단",
+                    line=dict(width=1, color=band_color, dash="dot"),
+                    fill="tonexty",
+                    fillcolor="rgba(148,163,184,0.12)",
+                ),
+                row=1,
+                col=1,
+            )
+
+        if show_ichimoku and {
+            "ichimoku_tenkan",
+            "ichimoku_kijun",
+            "ichimoku_senkou_a",
+            "ichimoku_senkou_b",
+        } <= set(df.columns):
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index, y=df["ichimoku_tenkan"], name="전환선", line=dict(width=1, color="#ef4444")
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index, y=df["ichimoku_kijun"], name="기준선", line=dict(width=1, color="#3b82f6")
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["ichimoku_senkou_a"],
+                    name="선행스팬A",
+                    line=dict(width=0.6, color="rgba(16,185,129,0.6)"),
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["ichimoku_senkou_b"],
+                    name="선행스팬B",
+                    line=dict(width=0.6, color="rgba(239,68,68,0.6)"),
+                    fill="tonexty",
+                    fillcolor="rgba(148,163,184,0.15)",
+                ),
+                row=1,
+                col=1,
+            )
+
+        if has_vp:
+            fig.add_trace(
+                go.Bar(
+                    x=volume_profile["volume"],
+                    y=volume_profile["price_mid"],
+                    orientation="h",
+                    marker_color="rgba(100,116,139,0.55)",
+                    showlegend=False,
+                    name="매물대",
+                    width=(volume_profile["price_high"] - volume_profile["price_low"]) * 0.9,
+                ),
+                row=1,
+                col=2,
+            )
+            fig.update_xaxes(showticklabels=False, row=1, col=2)
+            fig.update_yaxes(showticklabels=False, row=1, col=2)
+
+        if index_overlays:
+            base = float(df["Close"].iloc[0])
+            for i, (label, series) in enumerate(index_overlays.items()):
+                rebased = _rebase(series, df.index, base)
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=rebased,
+                        name=f"{label} (비교)",
+                        line=dict(width=1.2, dash="dot", color=_INDEX_COLORS[i % len(_INDEX_COLORS)]),
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+    row = 1 if include_price else 0
     if show_volume:
         row += 1
-        colors = [_UP if c >= o else _DOWN for o, c in zip(df["Open"], df["Close"], strict=True)]
+        colors = [up_color if c >= o else down_color for o, c in zip(df["Open"], df["Close"], strict=True)]
         fig.add_trace(
             go.Bar(x=df.index, y=df["Volume"], name="거래량", marker_color=colors, showlegend=False),
             row=row,
@@ -321,7 +328,7 @@ def build_chart(
             row=row,
             col=1,
         )
-        hist_colors = [_UP if v >= 0 else _DOWN for v in df["hist"]]
+        hist_colors = [up_color if v >= 0 else down_color for v in df["hist"]]
         fig.add_trace(
             go.Bar(x=df.index, y=df["hist"], name="Hist", marker_color=hist_colors, showlegend=False),
             row=row,
@@ -337,7 +344,7 @@ def build_chart(
         hovermode="x unified",
     )
 
-    if show_rangeselector:
+    if show_rangeselector and include_price:
         fig.update_xaxes(
             rangeselector=dict(
                 buttons=[
@@ -353,7 +360,7 @@ def build_chart(
             row=1,
             col=1,
         )
-    if log_y:
+    if log_y and include_price:
         fig.update_yaxes(type="log", row=1, col=1)
 
     if crosshair:
@@ -381,8 +388,45 @@ def build_chart(
         # dragmode는 안 건드린다 — drag_pan이 켠 "pan"을 기본값으로 유지하고, 사용자가
         # 모드바에서 그리기 버튼을 클릭하면 Plotly가 알아서 dragmode를 그 도구로 바꾼다.
         fig.update_layout(
-            newshape={"line": {"color": _UP, "width": 1.5}},
+            newshape={"line": {"color": up_color, "width": 1.5}},
             modebar_add=["drawline", "drawopenpath", "drawrect", "drawcircle", "eraseshape"],
         )
 
+    return fig
+
+
+def build_volume_chart(
+    df: pd.DataFrame,
+    up_color: str = _UP,
+    down_color: str = _DOWN,
+    crosshair: bool = False,
+    height: int | None = None,
+) -> go.Figure:
+    """거래량만 그리는 단독(단일 서브플롯) 차트 — build_chart()의 거래량 패널과 색상·로직이
+    동일하다. 가격 차트와 별도 Plotly 컴포넌트로 그려서 둘 사이 경계를 드래그로 리사이즈할
+    수 있게 할 때 쓴다(pages/모니터링.py의 드래그 리사이즈 뷰 참고) — 그 경우 x축 동기화는
+    두 컴포넌트가 공유하는 JS가 처리하므로 이 함수 자체는 다른 차트와의 연동을 모른다.
+    """
+    colors = [up_color if c >= o else down_color for o, c in zip(df["Open"], df["Close"], strict=True)]
+    fig = go.Figure(
+        go.Bar(x=df.index, y=df["Volume"], name="거래량", marker_color=colors, showlegend=False)
+    )
+    fig.update_layout(
+        margin=dict(l=40, r=20, t=10, b=30),
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        **({"height": height} if height else {}),
+    )
+    if crosshair:
+        fig.update_xaxes(
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikecolor="rgba(148,163,184,0.7)",
+            spikethickness=1,
+            spikedash="dot",
+        )
+        fig.update_yaxes(
+            showspikes=True, spikesnap="cursor", spikecolor="rgba(148,163,184,0.7)", spikethickness=1, spikedash="dot"
+        )
     return fig
