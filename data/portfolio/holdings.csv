@@ -1,4 +1,5 @@
 code,name,quantity,avg_price
-MU,Micron Technology Inc. Common Stock,10,1337926.8656030274
-032830,삼성생명,47,285000.0
-CRDO,Credo Technology Group Holding Ltd Ordinary Shares,57,224479.46466064453
+MU,Micron Technology Inc. Common Stock,10.0,1337926.8656030274
+032830,삼성생명,47.0,285000.0
+CRDO,Credo Technology Group Holding Ltd Ordinary Shares,57.0,224479.46466064453
+KRW-IOST,아이오에스티,8512843.98757312,1.52
