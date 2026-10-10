@@ -373,6 +373,20 @@ def test_fetch_news_list_empty_payload_returns_empty_frame(monkeypatch):
     assert list(df.columns) == ["article_id", "office_id", "title", "press", "date", "url"]
 
 
+def test_fetch_news_list_does_not_cache_empty_result(monkeypatch, tmp_path):
+    """소스가 고장 나 0건이 온 시점의 캐시가 남으면 고친 뒤에도 TTL 동안 빈 값이 나온다
+    — 2026-10-10 엔드포인트 교체 직후 실제로 겪은 문제."""
+    monkeypatch.setattr(news, "cache_path", lambda kind, key: tmp_path / f"{kind}.parquet")
+
+    _patch_news_get(monkeypatch, [])  # 고장(또는 뉴스 없음) → 0건
+    assert news.fetch_news_list("005930").empty
+    assert not (tmp_path / "news_list.parquet").exists(), "빈 결과가 캐시됐다"
+
+    _patch_news_get(monkeypatch, [_cluster()])  # 소스 복구
+    assert len(news.fetch_news_list("005930")) == 1  # 캐시된 빈 값에 막히지 않는다
+    assert (tmp_path / "news_list.parquet").exists()  # 정상 결과는 캐시된다
+
+
 def test_format_datetime_passthrough_on_unexpected_value():
     assert news._format_datetime("202610101428") == "2026.10.10 14:28"
     assert news._format_datetime("2026-10-10") == "2026-10-10"  # 형식이 바뀌어도 죽지 않는다

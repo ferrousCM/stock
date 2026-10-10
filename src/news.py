@@ -112,7 +112,10 @@ def fetch_news_list(code: str, pages: int = 1, use_cache: bool = True) -> pd.Dat
         .drop_duplicates(subset=["office_id", "article_id"])
         .reset_index(drop=True)
     )
-    if use_cache:
+    # 빈 결과는 캐시하지 않는다. 소스가 고장 나 0건이 돌아온 시점의 캐시가 남아 있으면
+    # 고친 뒤에도 TTL이 끝날 때까지 계속 빈 값이 나온다 — 2026-10-10 엔드포인트 교체
+    # 직후 실제로 겪었다. 뉴스가 정말 없는 종목은 드물어 재조회 비용도 무시할 만하다.
+    if use_cache and not df.empty:
         df.to_parquet(path)
     return df
 
