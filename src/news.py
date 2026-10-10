@@ -1,13 +1,33 @@
-"""네이버 금융 종목 뉴스 스크래핑.
+"""네이버 종목 뉴스 조회.
 
-네이버 금융의 종목별 뉴스 목록(finance.naver.com)에서 기사를 가져오고,
-각 기사 원문(n.news.naver.com)을 받아 요약 + 감성 점수를 매긴다.
+종목별 뉴스 목록을 네이버 증권 모바일 JSON API에서 가져오고, 각 기사 원문
+(n.news.naver.com)을 받아 요약 + 감성 점수를 매긴다.
 
-주의: 비공식 스크래핑이다. 네이버가 페이지 구조를 바꾸면 셀렉터가 깨질 수 있다.
+**2026-10-10 소스 교체**: 원래는 `finance.naver.com/item/news_news.naver` HTML을
+스크래핑했는데, 네이버 금융이 "Npay 증권"으로 개편되면서 이 엔드포인트가 **HTTP 410
+Gone**으로 폐기됐다(응답은 빈 `table.type5` 껍데기라 파싱 오류 없이 0건이 나왔다 —
+그래서 5주 넘게 조용히 깨진 채 방치됐고, 그 기간 국내 종목 감성 히스토리가 비었다).
+대체 소스는 모바일 웹이 실제로 쓰는 공개 JSON API다:
+
+    https://m.stock.naver.com/api/news/stock/{종목코드}?pageSize=20&page=1
+
+응답은 `[{total, items:[{officeId, articleId, officeName, datetime, title,
+titleFull, body, mobileNewsUrl, ...}]}, ...]` 꼴의 **클러스터 배열**이다(묶음 기사의
+대표 1건만 items에 담겨 오고, total은 그 묶음 크기). 기존 HTML 스크래핑보다 오히려
+안정적이다 — euc-kr 인코딩 처리가 필요 없고(UTF-8 JSON), Referer 헤더 없이도 되고,
+officeId/articleId가 그대로 있어 기사 원문 URL을 지금 방식대로 조립할 수 있다.
+
+**실패하면 조용히 빈 결과를 주지 말고 예외를 낸다**(`raise_for_status`). 이번 고장이
+오래 안 보였던 원인이 "스크래핑 실패 = 빈 DataFrame"이었기 때문이다. 대신 매매
+파이프라인(`scripts/run_daily_trading.py`)은 뉴스 조회 실패를 감성 중립(0)으로 흡수해
+매매 자체는 계속한다 — 화면에서는 오류가 보이고, 봇은 멈추지 않는 쪽이 맞다.
+
+주의: 비공식 API다. 네이버가 응답 구조를 바꾸면 깨질 수 있다.
 """
 
 from __future__ import annotations
 
+import html as html_lib
 import math
 import re
 from pathlib import Path
@@ -23,19 +43,32 @@ from .config import NEWS_CACHE_TTL_SEC, RAW_DIR
 _SENTIMENT_LOG_DIR = RAW_DIR / "news_sentiment"
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-_LIST_URL = "https://finance.naver.com/item/news_news.naver"
+_LIST_URL = "https://m.stock.naver.com/api/news/stock/{code}"
 _ARTICLE_URL = "https://n.news.naver.com/mnews/article/{office_id}/{article_id}"
-_ITEMS_PER_LIST_PAGE = 20  # 네이버 금융 뉴스 목록 페이지당 기사 수(실측 기준 근사)
+_ITEMS_PER_LIST_PAGE = 20  # JSON API의 pageSize — 페이지당 기사 수(실측: 중복 없이 20건씩)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?다요음]\s)|(?<=[.!?다요음]$)")
 
 
 def _list_referer(code: str) -> str:
-    return f"https://finance.naver.com/item/news.naver?code={code}"
+    """API를 실제로 호출하는 모바일 뉴스 페이지. 없어도 응답하지만 맞춰 보낸다."""
+    return f"https://m.stock.naver.com/domestic/stock/{code}/news"
+
+
+def _format_datetime(raw: str) -> str:
+    """API의 'YYYYMMDDHHMM' → 'YYYY.MM.DD HH:MM'(기존 HTML 목록과 같은 표기)."""
+    s = str(raw)
+    if len(s) < 12 or not s.isdigit():
+        return s
+    return f"{s[0:4]}.{s[4:6]}.{s[6:8]} {s[8:10]}:{s[10:12]}"
 
 
 def fetch_news_list(code: str, pages: int = 1, use_cache: bool = True) -> pd.DataFrame:
-    """종목 뉴스 목록 (제목/언론사/일시/기사ID). 중복 게재 기사는 제거한다."""
+    """종목 뉴스 목록 (제목/언론사/일시/기사ID). 중복 게재 기사는 제거한다.
+
+    pages는 요청할 페이지 수(페이지당 `_ITEMS_PER_LIST_PAGE`건) — 요청 수가 pages에
+    비례하도록 고정돼 있고 기사 본문은 받지 않는다.
+    """
     path = cache_path("news_list", f"{code}|{pages}")
     if use_cache and is_fresh(path, ttl_sec=NEWS_CACHE_TTL_SEC):
         return pd.read_parquet(path)
@@ -43,59 +76,77 @@ def fetch_news_list(code: str, pages: int = 1, use_cache: bool = True) -> pd.Dat
     headers = {**_HEADERS, "Referer": _list_referer(code)}
     rows = []
     for page in range(1, pages + 1):
-        params = {
-            "code": code,
-            "page": page,
-            "sm": "title_entity_id.basic",
-            "clusterId": "",
-        }
-        r = requests.get(_LIST_URL, headers=headers, params=params, timeout=10)
-        r.encoding = "euc-kr"
-        soup = BeautifulSoup(r.text, "html.parser")
+        r = requests.get(
+            _LIST_URL.format(code=code),
+            headers=headers,
+            params={"pageSize": _ITEMS_PER_LIST_PAGE, "page": page},
+            timeout=10,
+        )
+        r.raise_for_status()  # 엔드포인트가 또 폐기되면 빈 결과가 아니라 예외로 드러나게
+        clusters = r.json()
+        if not isinstance(clusters, list):
+            raise RuntimeError(f"뉴스 API 응답 형식이 바뀌었습니다 (list 아님: {type(clusters).__name__})")
 
-        for tr in soup.select("table.type5 tbody tr"):
-            a = tr.select_one("td.title a")
-            if not a:
-                continue
-            href = a.get("href", "")
-            m = re.search(r"article_id=(\d+).*office_id=(\d+)", href)
-            if not m:
-                continue
-            article_id, office_id = m.group(1), m.group(2)
-            info = tr.select_one("td.info")
-            date = tr.select_one("td.date")
-            rows.append(
-                {
-                    "article_id": article_id,
-                    "office_id": office_id,
-                    "title": a.get_text(strip=True),
-                    "press": info.get_text(strip=True) if info else "",
-                    "date": date.get_text(strip=True) if date else "",
-                    "url": _ARTICLE_URL.format(office_id=office_id, article_id=article_id),
-                }
-            )
+        for cluster in clusters:
+            for item in cluster.get("items", []):
+                office_id, article_id = str(item.get("officeId", "")), str(item.get("articleId", ""))
+                if not office_id or not article_id:
+                    continue
+                title = item.get("titleFull") or item.get("title") or ""
+                rows.append(
+                    {
+                        "article_id": article_id,
+                        "office_id": office_id,
+                        # API가 &quot; 같은 HTML 엔티티를 그대로 주는 경우가 있어 풀어준다
+                        "title": html_lib.unescape(title).strip(),
+                        "press": html_lib.unescape(str(item.get("officeName", ""))).strip(),
+                        "date": _format_datetime(item.get("datetime", "")),
+                        "url": _ARTICLE_URL.format(office_id=office_id, article_id=article_id),
+                    }
+                )
 
-    df = pd.DataFrame(rows).drop_duplicates(subset="article_id").reset_index(drop=True)
+    # article_id는 언론사별 연번이라 단독으로는 서로 다른 기사끼리 충돌할 수 있다 —
+    # (office_id, article_id) 조합으로 중복을 제거한다.
+    df = (
+        pd.DataFrame(rows, columns=["article_id", "office_id", "title", "press", "date", "url"])
+        .drop_duplicates(subset=["office_id", "article_id"])
+        .reset_index(drop=True)
+    )
     if use_cache:
         df.to_parquet(path)
     return df
 
 
-def fetch_article_body(office_id: str, article_id: str, use_cache: bool = True) -> str:
-    """네이버 뉴스 원문 본문 텍스트."""
+def fetch_article(office_id: str, article_id: str, use_cache: bool = True) -> dict:
+    """네이버 뉴스 원문의 제목·본문. 요청 1회로 둘 다 받아 같은 캐시에 담는다.
+
+    제목까지 받는 이유: 목록 API(`fetch_news_list`)가 긴 제목을 45자 근처에서
+    `...`로 잘라서 준다. 본문은 어차피 받아야 하므로(요약·감성) 같은 응답에서 전체
+    제목을 함께 꺼내면 추가 네트워크 비용 없이 잘린 제목을 복원할 수 있다.
+    """
     path = cache_path("news_body", f"{office_id}|{article_id}")
     if use_cache and is_fresh(path, ttl_sec=24 * 3600):  # 원문은 안 바뀌므로 하루 캐시
-        return pd.read_parquet(path)["body"].iloc[0]
+        cached = pd.read_parquet(path)
+        # title 컬럼은 나중에 추가된 것 — 그 전에 만들어진 캐시에는 없다
+        title = str(cached["title"].iloc[0]) if "title" in cached.columns else ""
+        return {"title": title, "body": str(cached["body"].iloc[0])}
 
     url = _ARTICLE_URL.format(office_id=office_id, article_id=article_id)
     r = requests.get(url, headers=_HEADERS, timeout=10)
     soup = BeautifulSoup(r.text, "html.parser")
-    el = soup.select_one("#dic_area")
-    body = el.get_text(" ", strip=True) if el else ""
+    body_el = soup.select_one("#dic_area")
+    body = body_el.get_text(" ", strip=True) if body_el else ""
+    title_el = soup.select_one("#title_area")
+    title = title_el.get_text(" ", strip=True) if title_el else ""
 
     if use_cache:
-        pd.DataFrame({"body": [body]}).to_parquet(path)
-    return body
+        pd.DataFrame({"body": [body], "title": [title]}).to_parquet(path)
+    return {"title": title, "body": body}
+
+
+def fetch_article_body(office_id: str, article_id: str, use_cache: bool = True) -> str:
+    """네이버 뉴스 원문 본문 텍스트."""
+    return fetch_article(office_id, article_id, use_cache=use_cache)["body"]
 
 
 def summarize(body: str, max_sentences: int = 2, max_chars: int = 200) -> str:
@@ -131,14 +182,19 @@ def enrich_with_sentiment(listing: pd.DataFrame, use_cache: bool = True) -> pd.D
         return listing
 
     listing = listing.copy()
-    summaries, labels, scores = [], [], []
+    titles, summaries, labels, scores = [], [], [], []
     for _, row in listing.iterrows():
-        body = fetch_article_body(row["office_id"], row["article_id"], use_cache=use_cache)
+        article = fetch_article(row["office_id"], row["article_id"], use_cache=use_cache)
+        body = article["body"]
+        # 목록 API가 잘라서 준 제목(…/...로 끝남)은 원문 제목으로 되살린다
+        title = article["title"] or row["title"]
+        titles.append(title)
         summaries.append(summarize(body))
-        result = sentiment.score(f"{row['title']} {body}")
+        result = sentiment.score(f"{title} {body}")
         labels.append(result["label"])
         scores.append(result["score"])
 
+    listing["title"] = titles
     listing["summary"] = summaries
     listing["sentiment_label"] = labels
     listing["sentiment_score"] = scores

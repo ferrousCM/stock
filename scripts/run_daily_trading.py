@@ -96,13 +96,20 @@ def _build_signal(code: str, name: str) -> dict | None:
     # app.py와 동일한 순서: 오늘자 뉴스를 먼저 히스토리에 기록한 뒤, 그 히스토리를
     # 학습 피처로 읽는다 (CLAUDE.md 규칙 — log_daily_sentiment 직접 호출 금지, 반드시
     # log_sentiment_from_news를 거쳐 긍정/부정/기사 수 피처까지 채운다).
-    if market in ("COIN", "US"):
-        # 코인·해외증시는 종목코드 기반 뉴스 소스가 없어(pages/모니터링.py와 동일한 사정)
-        # 종목명 키워드 검색(crypto_news)을 공유 재사용한다.
-        news_df = crypto_news.fetch_news_with_sentiment(name, n=10)
-    else:
-        news_df = news.fetch_news_with_sentiment(code, n=10)
-    news.log_sentiment_from_news(code, news_df)
+    # 뉴스 조회 실패는 이 종목의 신호 생성 자체를 포기할 이유가 아니다 — 감성을 중립(0)으로
+    # 두고 가격 기반 신호만으로 진행한다. news.py는 소스가 죽었을 때 조용한 빈 결과가 아니라
+    # 예외를 내도록 되어 있어(2026-10-10 엔드포인트 폐기 사고 참고) 여기서 받아 흡수한다.
+    try:
+        if market in ("COIN", "US"):
+            # 코인·해외증시는 종목코드 기반 뉴스 소스가 없어(pages/모니터링.py와 동일한 사정)
+            # 종목명 키워드 검색(crypto_news)을 공유 재사용한다.
+            news_df = crypto_news.fetch_news_with_sentiment(name, n=10)
+        else:
+            news_df = news.fetch_news_with_sentiment(code, n=10)
+        news.log_sentiment_from_news(code, news_df)
+    except Exception as e:  # noqa: BLE001 — 뉴스는 보조 피처라 전체 실행을 막지 않는다
+        print(f"  {code}({name}) 뉴스 조회 실패 — 감성 중립으로 진행: {e}")
+        news_df = pd.DataFrame()
     sentiment_hist = news.sentiment_history(code)
 
     result = predictor.train_and_predict(price_df, horizon=PREDICT_HORIZON, sentiment_hist=sentiment_hist)

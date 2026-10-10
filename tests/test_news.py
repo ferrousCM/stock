@@ -1,7 +1,8 @@
 """뉴스/감성/공시 모듈 테스트.
 
-sentiment는 순수 함수라 오프라인. news/dart는 외부 사이트·API를 치므로 network 마커.
-dart는 DART_API_KEY가 없으면 자동으로 skip한다 (키 발급은 사용자 몫).
+sentiment는 순수 함수라 오프라인. news의 응답 파싱도 가짜 응답으로 오프라인 검증한다
+(실제 호출이 필요한 것만 network 마커). dart는 DART_API_KEY가 없으면 자동으로 skip한다
+(키 발급은 사용자 몫).
 """
 
 import sys
@@ -9,6 +10,7 @@ import types
 
 import pandas as pd
 import pytest
+import requests
 
 from src import config, dart, news, sentiment
 
@@ -169,25 +171,48 @@ def test_summarize_empty_body():
 # --------------------------------------------- enrich_with_sentiment / fetch_news_list_n (오프라인)
 
 
-def test_enrich_with_sentiment_fills_columns(monkeypatch):
-    monkeypatch.setattr(news, "fetch_article_body", lambda o, a, use_cache=True: "호재가 가득한 본문")
-    monkeypatch.setattr(news.sentiment, "score", lambda text: {"label": "긍정", "score": 2})
-    listing = pd.DataFrame(
+def _listing(titles=("제목1", "제목2")) -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "article_id": ["1", "2"],
             "office_id": ["9", "9"],
-            "title": ["제목1", "제목2"],
+            "title": list(titles),
             "press": ["A", "B"],
             "date": ["", ""],
             "url": ["u1", "u2"],
         }
     )
+
+
+def test_enrich_with_sentiment_fills_columns(monkeypatch):
+    monkeypatch.setattr(
+        news, "fetch_article", lambda o, a, use_cache=True: {"title": "", "body": "호재가 가득한 본문"}
+    )
+    monkeypatch.setattr(news.sentiment, "score", lambda text: {"label": "긍정", "score": 2})
+    listing = _listing()
+
     out = news.enrich_with_sentiment(listing)
+
     assert list(out["summary"]) == ["호재가 가득한 본문", "호재가 가득한 본문"]
     assert list(out["sentiment_label"]) == ["긍정", "긍정"]
     assert list(out["sentiment_score"]) == [2, 2]
+    assert list(out["title"]) == ["제목1", "제목2"]  # 원문 제목이 없으면 목록 제목 유지
     # 원본은 그대로 (copy 후 채움)
     assert "summary" not in listing.columns
+
+
+def test_enrich_with_sentiment_restores_truncated_title(monkeypatch):
+    """목록 API가 긴 제목을 '...'로 잘라 주므로 원문 제목으로 되살려야 한다."""
+    monkeypatch.setattr(
+        news,
+        "fetch_article",
+        lambda o, a, use_cache=True: {"title": "잘리지 않은 전체 제목입니다", "body": "본문"},
+    )
+    monkeypatch.setattr(news.sentiment, "score", lambda text: {"label": "중립", "score": 0})
+
+    out = news.enrich_with_sentiment(_listing(("잘리지 않은 전체 제...", "잘리지 않은 전체 제...")))
+
+    assert list(out["title"]) == ["잘리지 않은 전체 제목입니다"] * 2
 
 
 def test_enrich_with_sentiment_passthrough_empty():
@@ -211,6 +236,147 @@ def test_fetch_news_list_n_requests_enough_pages(monkeypatch):
 
     news.fetch_news_list_n("005930", n=10)
     assert seen["pages"] == 1
+
+
+# --------------------------------------------- fetch_news_list (JSON API 파싱, 오프라인)
+#
+# 이 블록이 없어서 2026-10-10 사고를 5주 넘게 못 봤다 — 구 엔드포인트(finance.naver.com
+# HTML)가 HTTP 410으로 폐기됐는데 응답이 빈 테이블 껍데기라 "0건"만 조용히 반환됐고,
+# 이를 잡아낼 수 있었던 유일한 테스트가 network 마커라 평소 실행(-m "not network")에서
+# 빠져 있었다. 그래서 응답 파싱을 오프라인으로 검증하는 테스트를 둔다.
+
+
+class _FakeNewsResponse:
+    def __init__(self, payload, status: int = 200):
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Error")
+
+    def json(self):
+        return self._payload
+
+
+def _cluster(office_id="243", article_id="0000104053", title="제목", datetime_="202610101428", **kw):
+    """API 응답의 클러스터 1개 — 묶음 기사도 대표 1건만 items에 담겨 온다(실측)."""
+    item = {
+        "id": f"{office_id}{article_id}",
+        "officeId": office_id,
+        "articleId": article_id,
+        "officeName": "이코노미스트",
+        "datetime": datetime_,
+        "title": title,
+        "titleFull": title,
+        "body": "본문 스니펫",
+        "mobileNewsUrl": f"https://n.news.naver.com/mnews/article/{office_id}/{article_id}",
+    }
+    item.update(kw)
+    return {"total": 1, "items": [item]}
+
+
+def _patch_news_get(monkeypatch, payload, status: int = 200) -> list[dict]:
+    """요청 파라미터를 기록하면서 payload를 돌려주는 가짜 requests.get."""
+    calls: list[dict] = []
+
+    def _get(url, headers=None, params=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "params": params})
+        return _FakeNewsResponse(payload, status)
+
+    monkeypatch.setattr(news.requests, "get", _get)
+    return calls
+
+
+def test_fetch_news_list_parses_json_payload(monkeypatch):
+    _patch_news_get(monkeypatch, [_cluster(), _cluster(office_id="015", article_id="0005341011")])
+
+    df = news.fetch_news_list("005930", use_cache=False)
+
+    assert list(df.columns) == ["article_id", "office_id", "title", "press", "date", "url"]
+    assert len(df) == 2
+    first = df.iloc[0]
+    assert first["article_id"] == "0000104053"
+    assert first["office_id"] == "243"
+    assert first["press"] == "이코노미스트"
+    assert first["date"] == "2026.10.10 14:28"  # YYYYMMDDHHMM -> 사람이 읽는 표기
+    assert first["url"] == "https://n.news.naver.com/mnews/article/243/0000104053"
+
+
+def test_fetch_news_list_requests_expected_endpoint_and_pages(monkeypatch):
+    calls = _patch_news_get(monkeypatch, [_cluster()])
+
+    news.fetch_news_list("005930", pages=3, use_cache=False)
+
+    assert len(calls) == 3
+    assert calls[0]["url"] == "https://m.stock.naver.com/api/news/stock/005930"
+    assert [c["params"]["page"] for c in calls] == [1, 2, 3]
+    assert {c["params"]["pageSize"] for c in calls} == {news._ITEMS_PER_LIST_PAGE}
+
+
+def test_fetch_news_list_unescapes_html_entities(monkeypatch):
+    _patch_news_get(monkeypatch, [_cluster(title="&quot;삼성전자&quot; 신고가 &amp; 외국인 매수")])
+
+    df = news.fetch_news_list("005930", use_cache=False)
+
+    assert df.iloc[0]["title"] == '"삼성전자" 신고가 & 외국인 매수'
+
+
+def test_fetch_news_list_dedupes_same_article(monkeypatch):
+    """같은 기사가 여러 클러스터에 중복 게재되는 경우(실측) 한 건만 남긴다."""
+    _patch_news_get(monkeypatch, [_cluster(), _cluster()])
+
+    assert len(news.fetch_news_list("005930", use_cache=False)) == 1
+
+
+def test_fetch_news_list_keeps_same_article_id_from_different_press(monkeypatch):
+    """article_id는 언론사별 연번이라 단독으로 중복 판정하면 다른 기사가 사라진다."""
+    _patch_news_get(
+        monkeypatch,
+        [
+            _cluster(office_id="243", article_id="0000000001"),
+            _cluster(office_id="015", article_id="0000000001"),
+        ],
+    )
+
+    assert len(news.fetch_news_list("005930", use_cache=False)) == 2
+
+
+def test_fetch_news_list_skips_items_without_ids(monkeypatch):
+    _patch_news_get(monkeypatch, [{"total": 1, "items": [{"title": "아이디 없는 항목"}]}, _cluster()])
+
+    assert len(news.fetch_news_list("005930", use_cache=False)) == 1
+
+
+def test_fetch_news_list_raises_on_http_error(monkeypatch):
+    """엔드포인트가 또 폐기되면 빈 결과가 아니라 예외로 드러나야 한다(이번 사고의 교훈)."""
+    _patch_news_get(monkeypatch, [], status=410)
+
+    with pytest.raises(requests.HTTPError):
+        news.fetch_news_list("005930", use_cache=False)
+
+
+def test_fetch_news_list_raises_when_payload_shape_changes(monkeypatch):
+    _patch_news_get(monkeypatch, {"items": []})  # 예전엔 없던 dict 응답
+
+    with pytest.raises(RuntimeError):
+        news.fetch_news_list("005930", use_cache=False)
+
+
+def test_fetch_news_list_empty_payload_returns_empty_frame(monkeypatch):
+    """뉴스가 실제로 없는 종목(신규 상장 등)은 빈 DataFrame이 정상이다."""
+    _patch_news_get(monkeypatch, [])
+
+    df = news.fetch_news_list("000000", use_cache=False)
+
+    assert df.empty
+    assert list(df.columns) == ["article_id", "office_id", "title", "press", "date", "url"]
+
+
+def test_format_datetime_passthrough_on_unexpected_value():
+    assert news._format_datetime("202610101428") == "2026.10.10 14:28"
+    assert news._format_datetime("2026-10-10") == "2026-10-10"  # 형식이 바뀌어도 죽지 않는다
+    assert news._format_datetime("") == ""
 
 
 # ----------------------------------------------------------- news (네트워크)
