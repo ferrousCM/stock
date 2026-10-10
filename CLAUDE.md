@@ -23,7 +23,7 @@ src/
   screener.py     전종목 대량 스크리닝 (개별 조회가 아니라 벌크 소스 사용)
   indicators.py   기술적 지표 + 성과 지표 (순수 함수, pandas Series/DataFrame in-out)
   charts.py       Plotly 인터랙티브 차트 빌더 (Streamlit 비의존)
-  news.py         네이버 금융 뉴스 스크래핑 + 요약(리드 문단 발췌, LLM 아님)
+  news.py         네이버 종목 뉴스 조회(모바일 JSON API) + 요약(리드 문단 발췌, LLM 아님)
   sentiment.py    키워드 기반 감성 판정 (POSITIVE_WORDS/NEGATIVE_WORDS 매칭)
   dart.py         DART 전자공시 OpenAPI 연동 (API 키 필요, 없으면 DartKeyMissing)
   predictor.py    가격 예측 (릿지 회귀, 종목별 즉석 학습 + 홀드아웃 검증) — 투자 조언 아님
@@ -33,10 +33,21 @@ src/
   us_screener.py       screener.py의 해외증시(나스닥) 버전 — 나스닥 공개 스크리너 API 벌크 스크리닝.
                         개별 종목 히스토리/검색은 새 모듈 없이 data_loader.py를 그대로 재사용한다
                         (FDR가 이미 미국 티커를 지원 — market="NASDAQ"만 넘기면 됨)
+  portfolio.py    모의투자 원장 읽기/쓰기 (CSV — 아래 "모의투자" 참고)
+  trading_agent.py    v1 매매 규칙 엔진 3종(기본형/공격적/모멘텀) + 리스크 가드레일 + BOT_STRATEGIES
+  trading_agent_v2.py v2 매매 규칙 엔진 3종(tradermonty 스킬 방법론 포팅) + BOT_STRATEGIES_V2.
+                        가드레일·infer_market·TradeAction은 trading_agent.py에서 import해 공유
+  portfolio_ui.py 모의투자 리포팅 UI 공용 컴포넌트 (v1·v2 페이지가 같은 함수를 호출)
+  theme.py        대시보드 공통 색상/스타일 상수
+  resizable_chart.py  차트 높이 드래그 조절 컴포넌트 (Streamlit)
   plotting.py     matplotlib 한글 폰트 설정 (노트북 전용)
 app.py            기존 스크리닝 대시보드 단독 배포 진입점 — 더는 손대지 않는다(아래 참고)
 pages/모니터링.py  app.py의 확장판 — 좌상단에서 국내증시/해외증시/코인 전환 (demo_app.py 전용)
+pages/모의투자.py  모의투자 성과 리포팅 — v1 6봇 중 3봇 + v2 3봇(펼치기)
 demo_app.py       pages/모니터링.py + pages/모의투자.py를 묶은 데모 진입점 (st.navigation)
+scripts/
+  run_daily_trading.py       일일 매매 단일 진입점 (GitHub Actions + 로컬 --dry-run)
+  backtest_v2_strategies.py  v2 규칙 검증용 로컬 백테스트 (원장을 건드리지 않는다)
 notebooks/        탐색용. src를 import해서 재사용 (%autoreload 사용)
 tests/            pytest
 ```
@@ -57,8 +68,13 @@ tests/            pytest
 - **pykrx는 못 쓴다.** 최신 버전의 벌크 조회 함수(`get_market_ohlcv_by_ticker` 등)가 `KRX_ID`/`KRX_PW` 환경변수 기반 로그인을 요구한다. 로그인 정보가 없으므로 배제.
 - **`data.krx.co.kr`에 직접 POST로 스크래핑하는 것도 막혀 있다** (세션을 워밍업해도 `LOGOUT` 응답). KRX가 자체 방어를 강화한 상태.
 - 대신 FinanceDataReader가 실제로 쓰는 **GitHub 미러** `FinanceData/fdr_krx_data_cache`의 일자별 스냅샷 CSV(`data/listing/krx/{YYYY-MM-DD}.csv`)를 직접 지정한 날짜로 내려받는 방식이 로그인 없이 동작한다. `screener.py`가 이 방식을 쓴다. 과거 스냅샷은 최소 45일 이상 존재하는 것을 확인했다(그보다 오래된 비교가 필요하면 존재 여부를 먼저 확인할 것).
+- **이 미러는 장 마감 전·휴장일에도 그날짜 CSV를 "더미"로 미리 만들어 둔다** — 행 수는 정상(~2,900개)인데 `Close` 등 가격 컬럼이 전부 `"-"` 문자열이다(2026-09-25·10-09 실측). "파일이 있으니 유효"로 판단하면 등락률 계산에서 문자열끼리 빼다가 `TypeError`로 죽는다. `screener._snapshot_on()`이 숫자 변환 후 **종가가 하나도 없으면 None을 반환**해 직전 거래일로 폴백하도록 돼 있다(회귀 테스트 `test_screener.py`). 새로 스냅샷을 읽는 코드를 추가하면 같은 검증을 반드시 거칠 것.
 - `pandas 3.0` + `streamlit`을 같이 쓰면 `streamlit`이 `pyarrow` 상한 버전을 요구해 최신 `pyarrow`보다 낮은 버전이 깔릴 수 있다 (현재 24.0.0). 문제는 없지만 버전 충돌 경고가 뜨면 이게 원인일 가능성이 높다.
-- **네이버 금융 뉴스 스크래핑**(`news.py`)은 `Referer` 헤더(`https://finance.naver.com/item/news.naver?code={종목코드}`)가 없으면 빈 결과("검색된 뉴스가 없습니다")를 반환한다. 또한 응답 인코딩이 `euc-kr`이라 `r.encoding = "euc-kr"`을 명시해야 한글이 깨지지 않는다. 기사 원문은 목록 페이지가 아니라 `n.news.naver.com/mnews/article/{office_id}/{article_id}`에 있다 (목록의 `news_read.naver` 링크는 JS로 이 URL에 리다이렉트만 함 — office_id/article_id를 href에서 파싱해 바로 이 URL을 구성하면 리다이렉트 왕복을 생략할 수 있다).
+- **국내 종목 뉴스는 `m.stock.naver.com`의 공개 JSON API를 쓴다**(`news.py`). `https://m.stock.naver.com/api/news/stock/{종목코드}?pageSize=20&page=1` — 인증·Referer 불필요, UTF-8 JSON, 페이지당 20건에 페이지 간 중복 없음. 응답은 `[{total, items:[{officeId, articleId, officeName, datetime, title, ...}]}, ...]` 꼴의 **클러스터 배열**(묶음 기사는 대표 1건만 옴). 기사 원문은 여전히 `n.news.naver.com/mnews/article/{office_id}/{article_id}`다.
+  - 원래 쓰던 `finance.naver.com/item/news_news.naver` HTML 스크래핑(euc-kr + Referer 필요)은 **"Npay 증권" 개편과 함께 HTTP 410 Gone으로 폐기됐다**(2026-10-10 확인). 빈 `table.type5` 껍데기를 돌려줘서 파싱 예외 없이 0건이 나왔고, 그래서 5주 넘게 조용히 깨진 채였다 — 국내 종목 감성 히스토리에 그 기간 구멍이 남아 있다(소급 조회 불가).
+  - **목록 API는 긴 제목을 45자쯤에서 `...`로 자른다.** `enrich_with_sentiment()`가 어차피 받는 기사 원문(`#title_area`)에서 전체 제목을 복원한다(추가 요청 없음).
+  - `article_id`는 언론사별 연번이라 **중복 제거는 반드시 `(office_id, article_id)` 조합으로** 한다.
+- **외부 조회 결과가 비었을 때 그 결과를 캐시하지 않는다.** 소스 장애로 0건이 온 시점의 캐시가 남으면 코드를 고친 뒤에도 TTL이 끝날 때까지 계속 빈 값이 나온다(위 엔드포인트 교체 직후 실제로 겪음 — `NEWS_CACHE_TTL_SEC`는 30분). 같은 이유로 **조회 실패는 조용한 빈 결과가 아니라 예외로 드러내고**(`raise_for_status`), 그 예외를 흡수할지는 호출부가 정한다 — 예: `run_daily_trading.py`는 뉴스 실패를 감성 중립(0)으로 흡수해 매매를 계속한다(뉴스는 보조 피처라 봇을 멈출 이유가 아니다).
 - **DART API**는 무료지만 각자 https://opendart.fss.or.kr 에서 이메일 인증 후 키를 발급받아야 한다 — Claude가 대신 발급받을 수 없다. 키는 `.env`(gitignore됨)의 `DART_API_KEY`로 관리하고 `config.py`가 `python-dotenv`로 로드한다. 종목코드(6자리)와 DART의 corp_code(8자리)는 다른 체계라 `corpCode.xml`(zip) 전체를 내려받아 매핑해야 한다 — 이것도 상장사 전체를 한 번에 주므로 종목별 반복 호출이 아니다.
 - **API 키는 절대 코드에 하드코딩하거나 커밋되는 파일에 넣지 않는다.** 항상 `.env` + `config.py`의 `os.environ.get(...)` 패턴을 따른다. 키가 없을 때는 조용히 실패하지 말고 (`DartKeyMissing`처럼) 무엇을 어디서 발급받아야 하는지 알려주는 예외/메시지를 낸다.
 - **뉴스 감성의 과거 히스토리는 조회할 방법이 없다** (뉴스 소스가 최신 기사 목록만 제공). `predictor.py`가 뉴스 피처를 쓰려면 매 실행마다 그날의 감성을 `data/raw/news_sentiment/{종목코드}.parquet`에 누적 기록하는 수밖에 없다 — 기록 시작 전 과거는 중립(0)으로 채운다. 기록은 **`news.log_sentiment_from_news(code, news_df)`** 를 쓴다(저수준 `log_daily_sentiment()`를 직접 부르지 말 것). 평균 점수만 넘기면 심층 모델이 쓰는 긍정/부정/기사 수 피처가 영원히 비어 항상 0이 된다 — 실제로 그렇게 방치됐던 적이 있다.
@@ -103,7 +119,11 @@ tests/            pytest
 
 - **단일 공유 포트폴리오** — 로그인 없음. 링크를 여는 모두가 같은 포트폴리오를 본다. 멀티유저는 범위 밖(PRD 9장).
 - **봇 다중화 — 기본형/공격적/모멘텀 (2026-08-22, PRD 10장 8단계).** 같은 날 같은 시세·예측신호·뉴스감성을 세 봇이 공유하고(계산 비용이 커서 하루 한 번만 계산), "무엇을 살지" 판단하는 함수만 봇마다 분리돼 있다 — `trading_agent.py`의 `decide_trades`(기본형)/`decide_trades_aggressive`(진입 임계값 완화 + 보유 종목 추가매수(피라미딩) 허용)/`decide_trades_momentum`(예측 수익률이 아니라 SMA5·SMA20 추세 정렬이 1차 진입 조건, 청산에 추세 이탈 조건 추가)로 나뉜다. 세 봇은 `trading_agent.BOT_STRATEGIES`(`{bot_id: {label, decide_trades, rules}}`) 하나에 등록돼 있고, `run_daily_trading.py`/`pages/모의투자.py`가 이 레지스트리만 순회한다 — 봇을 추가/제거할 땐 이 등록만 바꾸면 된다. 가드레일(`apply_risk_guardrail`)은 전략이 아니라 한도 검증이라 세 봇이 공유한다. **원장은 봇마다 완전히 분리된 디렉터리**(`config.portfolio_dir_for(bot_id)` — "default"는 기존 `data/portfolio/` 그대로 유지해 라이브 원장을 마이그레이션하지 않고, 그 외는 `data/portfolio/{bot_id}/`에 1억원으로 새로 시작)이며, `portfolio.py`의 모든 함수가 `portfolio_dir: Path | None = None`을 받아 이를 지원한다. **`.gitignore`의 `!data/portfolio/*.csv`는 한 단계 깊이만 un-ignore해서 봇 하위 디렉터리의 CSV를 계속 무시하는 버그였다** — `!data/portfolio/**/*.csv`로 재귀 매치하도록 고쳤다(새 원장 경로를 추가할 땐 `git add --dry-run <path>`로 실제 추적 대상이 되는지 먼저 확인할 것).
+- **v2 봇 3종 추가 — 지금 라이브는 총 6봇 (PRD 11장).** `trading_agent_v2.py`가 tradermonty Claude 스킬 방법론(MA 정렬 / Minervini VCP / stockbee 4% 버스트 + ATR 리스크 사이징)을 결정론적으로 포팅한 `decide_trades_v2_default`/`_aggressive`/`_momentum`을 `BOT_STRATEGIES_V2`에 등록한다. **`trading_agent.py`(v1)는 뜯어고치지 않는다** — 매일 라이브 원장을 갱신 중인 코드라 리스크를 최소화하고, 공통 유틸(`infer_market`·`TradeAction`·`apply_risk_guardrail`)만 import해 재사용한다. 원장은 `config.portfolio_dir_for_v2(bot_id)` → `data/portfolio/v2/{bot_id}/`로 v1과 완전히 분리. UI는 `pages/모의투자.py` 안의 펼치기 하나로 합쳐져 있고 v1/v2가 `portfolio_ui.py`의 같은 렌더 함수를 쓴다.
+  - **v2 임계값을 바꿀 땐 `scripts/backtest_v2_strategies.py`로 먼저 검증한다**(PRD 11.7). 특히 `_vcp_sweep()`은 공격적 봇의 수축구간×수축비×피벗근접을 3차원으로 돌려 표본 수·기대값·MDD를 같이 보여준다 — 2026-10-10에 초안값(lookback 10 / 0.85)이 **5주간 진입 0건**이었던 것을 이걸로 잡아 40 / 0.90으로 재조정했다(두 조건이 사실상 상호배타였다: 강하게 수축된 종목은 60일 고점에서 멀고, 고점 근처 종목은 ATR이 확장 중). 진입이 너무 드문 봇은 "조용히 안 도는" 상태로 오래 방치되기 쉬우니, 거래 0건이 1~2주 이어지면 고장 신호로 본다.
 - **실행 환경과 조회 환경을 완전히 분리한다.** 매매는 유저의 대시보드 방문과 무관하게 **GitHub Actions**(`.github/workflows/daily_trading.yml`)가 매일 1회(평일 19:30 KST 전후 — GitHub 커밋 이력으로 실측한 값, 아래 참고) 독립적으로 실행한다 — Streamlit 앱 안에 "방문 시 매매 실행" 같은 트리거를 절대 넣지 않는다. Streamlit 쪽(`pages/모의투자.py`, `demo_app.py`에서만 노출 — 기존 `app.py`는 수정하지 않는다)은 GitHub Actions가 커밋해 둔 원장을 **읽기만** 한다. 장중(09:00~17:00) 내내 반복 실행하는 것은 검토했지만 채택하지 않았다 — 이 프로젝트 데이터가 일봉 기준이라 장중에 다시 돌려도 새 정보가 없고, 진짜 장중 실시간은 지금 없는 실시간 시세 소스가 새로 필요해서 스코프가 커진다 (PRD 2장·9장 "검토했지만 채택하지 않은 것"/"향후 확장" 참고).
+- **cron 예약 시각(10:30 UTC = 19:30 KST)과 실제 실행 시각이 다르다.** GitHub Actions의 schedule은 혼잡하면 밀리는데, 이 저장소는 실측상 **5~9시간 밀려** 15~19시 UTC에 실행된다(= KST로 다음 날 00:30~04:30). 두 가지 부작용이 있다: (1) `equity_history.csv`의 날짜가 실행 시점의 KST 날짜라 **반영된 종가보다 하루 앞서 라벨링**된다(10-08 종가가 `2026-10-09` 행). (2) KST 자정을 넘기면서 **다음 날짜의 더미 스냅샷**을 집으려 한다(위 "알려진 제약"의 KRX 더미 스냅샷 — 36회 중 6회 실패의 원인이었다). 실행 이력은 `https://api.github.com/repos/ferrousCM/stock/actions/workflows/daily_trading.yml/runs`로 로그인 없이 확인할 수 있다.
+- **워크플로는 `data/portfolio/`만 커밋한다.** 그래서 Actions가 매일 계산하는 뉴스 감성은 러너와 함께 사라지고, `data/raw/news_sentiment/`에는 **로컬에서 돌린 날의 기록만** 쌓인다. 예측 모델의 뉴스 피처가 듬성듬성해지는 원인이니, 이걸 바꾸려면 감성 로그를 CSV로 먼저 바꾸는 게 맞다 — parquet을 매일 커밋하면 "같은 내용도 바이트가 달라지는" 통짜 blob이 종목 수만큼 매일 쌓인다(원장을 CSV로 정한 것과 같은 이유).
 - **신규 파일 계획**: `src/portfolio.py`(원장 읽기/쓰기), `src/trading_agent.py`(매매 규칙 엔진 + 리스크 가드레일), `scripts/run_daily_trading.py`(①~④를 묶는 단일 진입점, GitHub Actions와 로컬 수동 실행 양쪽에서 호출), `pages/모의투자.py`(성과 리포팅 UI), `demo_app.py`(신규 진입점 — `st.navigation`으로 기존 `app.py`와 `pages/모의투자.py`를 묶는다. **기존 `app.py`는 수정하지 않는다** — 지금 공유 중인 배포가 그대로 유지되고, 데모 대시보드는 별도 배포로 얹는다), `.github/workflows/daily_trading.yml`(스케줄러).
 - **매매 판단은 (V1 한정) LLM이 아니라 규칙 기반(결정론적) 엔진이다.** 원래 설계는 Claude API 기반 판단형 에이전트였으나, 유료 서비스라 지금은 키 발급 없이 진행하기로 했다 — 예측치·RSI·뉴스감성에 임계값을 적용해 매매를 결정한다. **외부 API 호출이 전혀 없고, 신규 의존성도 없다**(표준 라이브러리 `dataclasses`만 사용) — `anthropic`/`pydantic`은 설치는 확인해뒀지만 지금은 안 쓴다. LLM 원안은 PRD 9.1에 보존돼 있고, 나중에 되살릴 때는 `trading_agent.py`의 `decide_trades()` 내부 구현만 바꾸면 된다(그때 가서 Claude API 코드를 쓸 때는 `claude-api` 스킬을 먼저 로드해서 모델 ID·파라미터를 검증할 것 — 기억에 의존하지 않는다, 자주 바뀐다).
 - **매매 판단 로직의 출력은 제안일 뿐, 최종 승인은 항상 별도의 결정론적 코드(`trading_agent.py`의 리스크 가드레일)가 한다.** 종목당 최대 비중·동시보유 한도·현금 한도를 판단 로직이 지켰다고 가정하지 않고 다시 검증한다 — 둘 다 코드지만 "판단"과 "한도 강제"를 분리해두면 각각 독립적으로 테스트할 수 있다. 매매 규칙과 가드레일은 반드시 같은 상수 딕셔너리(`TRADING_RULES`) 하나를 참조한다 — 두 군데 따로 하드코딩하면 반드시 어긋난다. 그날 매매는 그날 종가로 체결된 것으로 가정한다(실시간 시세가 없으므로).
