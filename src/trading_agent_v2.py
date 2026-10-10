@@ -93,8 +93,24 @@ TRADING_RULES_V2_AGGRESSIVE = {
     "risk_pct_per_trade": 0.02,  # position-sizer "예외적 사유 없인 2% 초과 금지" 상한을 그대로 채용
     "atr_multiplier": 2.5,
     "take_profit_atr_multiplier": None,  # 피라미딩 전략이라 개별 익절 대신 종목당 비중 상한이 사실상의 상한
-    "contraction_lookback": 10,  # ATR 수축 비교 구간(최근 vs contraction_lookback일 전)
-    "contraction_ratio_max": 0.85,  # 최근 ATR ≤ 이전 ATR × 0.85 → 수축으로 판정
+    # ATR 수축 비교 구간·임계값 (2026-10-10 재조정, PRD 11.3/11.13).
+    #
+    # **왜 바꿨나** — 초안값(lookback 10 / 0.85)으로 운영한 결과 이 봇이 2026-09-01 이후
+    # 5주 넘게 진입을 한 건도 못 만들었다(누적 거래 2건, 100% 현금). 원인은 두 진입 조건이
+    # 서로를 배제하는 조합이었던 것: ATR14를 **10일 전과** 비교하면 "2주 만에 변동성 15%
+    # 급감"을 요구하게 되는데, 그런 급감은 급락이 끝난 종목에서 일어나고 그 종목은 60일
+    # 고점에서 멀리 떨어져 있다. 실측(2026-10-10, 신호 77종목): 수축 통과 13 / 피벗 통과 10
+    # / **교집합 0**, 수축비와 고점거리의 상관 +0.16(고점에 가까울수록 ATR이 오히려 확장).
+    #
+    # Minervini VCP의 베이스는 원래 수 주~수 개월에 걸쳐 형성되므로 비교 구간을 늘리는 것이
+    # 방법론에도 더 충실하다. 백테스트 스윕(scripts/backtest_v2_strategies.py의 _vcp_sweep,
+    # 2년 50종목)에서 lookback 40 / 0.90 / 피벗 5%가 전 조합 중 최고였다:
+    # n=154, 승률 58.4%, 기대값 +1.70%, MDD -14.1% (초안 10/0.85는 n=62, 54.8%, +0.96%).
+    # 인접 조합(40/0.85, 40/0.95, 30/0.90, 40/0.90+피벗10%)이 모두 기대값 양수인 고원이라
+    # 단일 지점에 과적합된 값이 아니다. 피벗 5%는 모든 lookback에서 10%·15%보다 MDD가
+    # 뚜렷하게 좋아 그대로 유지한다.
+    "contraction_lookback": 40,  # ATR 수축 비교 구간(최근 vs contraction_lookback일 전)
+    "contraction_ratio_max": 0.90,  # 최근 ATR ≤ 이전 ATR × 0.90 → 수축으로 판정
     "pivot_proximity_pct": 0.05,  # 최근 60일 고점 대비 -5% 이내
     "max_position_pct": 0.25,
     "max_holdings": 15,

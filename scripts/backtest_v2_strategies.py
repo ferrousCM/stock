@@ -47,6 +47,10 @@ LOOKBACK_YEARS = 2  # 종목당 히스토리 길이 — 짧을수록 빠르지�
 MAX_HOLD_DAYS = 20  # 손절·익절 모두 안 맞으면 이 날짜 뒤엔 시간 청산
 SLIPPAGE_PCT = 0.002  # backtest-expert "add friction" — 모든 체결가에 비관적으로 반영
 
+# 공격적 봇의 변동성 수축 비교 구간 후보 — _prepare()가 전부 미리 계산하고
+# _vcp_sweep()이 이 중에서 조합을 돌려본다(운영 값은 TRADING_RULES_V2_AGGRESSIVE).
+CONTRACTION_LOOKBACKS = (10, 20, 30, 40)
+
 # ----------------------------------------------------------------- 봇별 파라미터 (PRD 11.3 초안)
 
 
@@ -73,7 +77,9 @@ AGGRESSIVE_PARAMS = BotParams(
     take_profit_atr_multiplier=None,
     max_rsi_entry=80,
     risk_pct_per_trade=0.02,
-    extra={"contraction_lookback": 10, "contraction_ratio_max": 0.85, "pivot_proximity_pct": 0.05},
+    # 2026-10-10 _vcp_sweep() 결과로 재조정한 운영값 — TRADING_RULES_V2_AGGRESSIVE와 일치시킨다
+    # (초안 10/0.85는 실운영에서 진입이 거의 안 걸렸다. 근거는 trading_agent_v2.py 주석 참고).
+    extra={"contraction_lookback": 40, "contraction_ratio_max": 0.90, "pivot_proximity_pct": 0.05},
 )
 MOMENTUM_PARAMS = BotParams(
     label="모멘텀",
@@ -168,10 +174,10 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     out["volume_ratio_1d"] = volume / volume.shift(1)
     out["close_location"] = (close - low) / (high - low)
 
-    # 공격적(변동성 수축) 필드
-    out["atr_contraction_ratio"] = out["atr14"] / out["atr14"].shift(
-        AGGRESSIVE_PARAMS.extra["contraction_lookback"]
-    )
+    # 공격적(변동성 수축) 필드 — 스윕(_vcp_sweep)에서 lookback 자체를 바꿔보므로
+    # 후보 구간을 전부 미리 계산해 둔다(컬럼 몇 개 추가일 뿐 비용은 무시할 수준).
+    for lb in CONTRACTION_LOOKBACKS:
+        out[f"atr_contraction_ratio_{lb}"] = out["atr14"] / out["atr14"].shift(lb)
     out["dist_from_60d_high"] = close / high.rolling(60).max() - 1
 
     return out
@@ -187,12 +193,15 @@ def _entry_default(row) -> bool:
     return bool(ma_aligned and row["rsi14"] <= DEFAULT_PARAMS.max_rsi_entry)
 
 
-def _entry_aggressive(row) -> bool:
-    if pd.isna(row["atr_contraction_ratio"]) or pd.isna(row["dist_from_60d_high"]) or pd.isna(row["rsi14"]):
+def _entry_aggressive(row, params: BotParams = AGGRESSIVE_PARAMS) -> bool:
+    """변동성 수축 + 피벗(60일 고점) 근접. 임계값은 params.extra에서 읽는다 —
+    `_vcp_sweep()`이 같은 함수로 다른 조합을 돌려보기 위해 상수를 직접 참조하지 않는다."""
+    col = f"atr_contraction_ratio_{params.extra['contraction_lookback']}"
+    if pd.isna(row[col]) or pd.isna(row["dist_from_60d_high"]) or pd.isna(row["rsi14"]):
         return False
-    contracted = row["atr_contraction_ratio"] <= AGGRESSIVE_PARAMS.extra["contraction_ratio_max"]
-    near_high = row["dist_from_60d_high"] >= -AGGRESSIVE_PARAMS.extra["pivot_proximity_pct"]
-    return bool(contracted and near_high and row["rsi14"] <= AGGRESSIVE_PARAMS.max_rsi_entry)
+    contracted = row[col] <= params.extra["contraction_ratio_max"]
+    near_high = row["dist_from_60d_high"] >= -params.extra["pivot_proximity_pct"]
+    return bool(contracted and near_high and row["rsi14"] <= params.max_rsi_entry)
 
 
 def _entry_momentum(row, burst_threshold: float) -> bool:
@@ -322,7 +331,7 @@ def _run_bot_backtest(
                 triggered = (
                     _entry_default(row)
                     if bot_id == "default"
-                    else _entry_aggressive(row)
+                    else _entry_aggressive(row, params)
                     if bot_id == "aggressive"
                     else _entry_momentum(row, burst_threshold or MOMENTUM_PARAMS.extra["burst_threshold"])
                 )
@@ -425,6 +434,58 @@ def _sensitivity_sweep(
         print(f"  {sweep_name}={v}: n={n}, 승률(계좌기준)={win_rate:.1%}, 기대값(계좌기준)={expectancy:+.2%}")
 
 
+def _metrics(trades: list[Trade]) -> tuple[int, float, float, float]:
+    """(건수, 승률, 건당 기대값, MDD) — 전부 계좌 영향(equity_impact_pct) 기준."""
+    if not trades:
+        return 0, 0.0, 0.0, 0.0
+    impacts = np.array([t.equity_impact_pct for t in trades])
+    ordered = sorted(trades, key=lambda t: t.entry_date)
+    equity = np.cumprod([1 + t.equity_impact_pct for t in ordered])
+    mdd = float((equity / np.maximum.accumulate(equity) - 1).min())
+    return len(trades), float((impacts > 0).mean()), float(impacts.mean()), mdd
+
+
+def _vcp_sweep(histories: dict[str, pd.DataFrame]) -> None:
+    """공격적 봇의 VCP 진입 조건(수축 구간·수축비·피벗 근접) 3차원 스윕.
+
+    **왜 필요했나** — 운영 중이던 조합(lookback 10 / 수축비 ≤0.85 / 피벗 -5%)이
+    2026-09-01 이후 5주 넘게 진입을 한 건도 못 만들었다(원장 거래 2건, 100% 현금).
+    실측 결과 두 조건이 이 유니버스에서 사실상 상호배타였다: 2026-10-10 신호 77종목 중
+    수축 통과 13 / 피벗 통과 10 / **교집합 0**. 강하게 수축된 종목은 전부 60일 고점에서
+    -17%~-58% 떨어져 있었고, 고점 -5% 이내 종목의 수축비는 0.85~1.25였다
+    (수축비 vs 고점거리 상관 +0.16 — 고점에 가까울수록 ATR이 오히려 확장).
+
+    backtest-expert 원칙대로 "임계값을 눈대중으로 완화"하지 않고, 조합별 표본 수와
+    기대값·MDD를 같이 보고 고른다 — 거래가 늘기만 하고 기대값이 음수면 의미가 없다.
+    """
+    print(f"\n{'=' * 60}")
+    print("[공격적] VCP 진입 조건 3차원 스윕 (수축구간 × 수축비 × 피벗근접)")
+    print("  n=표본, 승률·기대값·MDD는 모두 계좌 영향 기준. n<30은 참고용.")
+    for lb in CONTRACTION_LOOKBACKS:
+        print(f"\n  --- contraction_lookback = {lb}일 ---")
+        print(f"  {'수축비':>8} {'피벗':>6} {'n':>5} {'승률':>7} {'기대값':>8} {'MDD':>8}")
+        for ratio in (0.85, 0.90, 0.95, 1.00):
+            for pivot in (0.05, 0.10, 0.15):
+                swept = BotParams(
+                    label=AGGRESSIVE_PARAMS.label,
+                    atr_multiplier=AGGRESSIVE_PARAMS.atr_multiplier,
+                    take_profit_atr_multiplier=AGGRESSIVE_PARAMS.take_profit_atr_multiplier,
+                    max_rsi_entry=AGGRESSIVE_PARAMS.max_rsi_entry,
+                    risk_pct_per_trade=AGGRESSIVE_PARAMS.risk_pct_per_trade,
+                    extra={
+                        "contraction_lookback": lb,
+                        "contraction_ratio_max": ratio,
+                        "pivot_proximity_pct": pivot,
+                    },
+                )
+                n, win, exp, mdd = _metrics(_run_bot_backtest(histories, "aggressive", swept))
+                print(
+                    f"  {ratio:>8.2f} {pivot:>6.0%} {n:>5d} {win:>7.1%} {exp:>+8.2%} {mdd:>+8.1%}"
+                    if n
+                    else f"  {ratio:>8.2f} {pivot:>6.0%} {0:>5d} {'-':>7} {'-':>8} {'-':>8}"
+                )
+
+
 def main() -> None:
     print("모의투자 v2 백테스트 검증 — PRD.md 11.7 (backtest-expert 방법론)\n")
     print("유니버스 수집 중 (국내+해외+코인 거래대금 상위)...")
@@ -454,6 +515,8 @@ def main() -> None:
     _sensitivity_sweep(histories, "default", DEFAULT_PARAMS, "atr_multiplier", [1.5, 2.0, 2.5, 3.0])
     _sensitivity_sweep(histories, "aggressive", AGGRESSIVE_PARAMS, "atr_multiplier", [1.5, 2.0, 2.5, 3.0])
     _sensitivity_sweep(histories, "momentum", MOMENTUM_PARAMS, "burst_threshold", [0.03, 0.04, 0.05])
+
+    _vcp_sweep(histories)
 
     print(f"\n{'=' * 60}")
     print("검증 종료 — 위 판정을 참고해 PRD.md 11.3의 TRADING_RULES_V2_* 초안 수치를")
