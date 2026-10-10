@@ -33,15 +33,43 @@ _RESULT_COLS = [
 
 _MONTHLY_DAYS_BACK = 30  # "월간" 비교 기준 — days_back(주간용, 기본 7)과 별개로 고정
 
+# 미러가 장 마감 전/휴장일에도 그날짜 CSV를 미리 만들어 두는데, 그 파일은 가격 컬럼이
+# 전부 "-"(문자열)이다. dtype이 숫자가 아니라 문자열로 읽히므로 아래 컬럼들을 항상
+# 숫자로 강제 변환한다 (거래정지 종목 몇 개만 "-"인 정상 스냅샷도 같은 처리로 흡수된다).
+_NUMERIC_COLS = ("Close", "Open", "High", "Low", "Changes", "ChagesRatio", "Volume", "Amount", "Marcap")
+
+
+def _fetch_csv(url: str) -> pd.DataFrame:
+    """스냅샷 CSV 한 장을 그대로 읽는다.
+
+    네트워크 경계를 이 함수 하나로 좁혀 둬서, 테스트가 이것만 대체하면
+    오프라인으로 스냅샷 파싱 로직을 검증할 수 있다.
+    """
+    return pd.read_csv(url, index_col=0, dtype={"Code": str})
+
 
 def _snapshot_on(date: pd.Timestamp) -> pd.DataFrame | None:
-    """해당 날짜의 KRX 전종목 스냅샷. 휴장일 등으로 없으면 None."""
+    """해당 날짜의 KRX 전종목 스냅샷. 휴장일 등으로 없거나 아직 안 채워졌으면 None.
+
+    **종가가 하나도 없는 "더미 스냅샷"도 None으로 취급한다.** 미러는 장 마감 전이나
+    휴장일에도 그날짜 파일을 미리 만들어 두는데, 그 파일은 행 수만 정상(~2,900개)이고
+    `Close`가 전부 `"-"`다(2026-09-25·10-09 실측). 예전에는 "비어 있지 않으면 유효"로
+    판단해 이 파일을 최신 스냅샷으로 집어, 등락률 계산에서 문자열끼리 빼다가
+    `TypeError`로 죽었다 — 자동매매 워크플로가 이 때문에 반복 실패했다.
+    None을 주면 `_nearest_snapshot()`이 하루 더 과거로 내려가 직전 거래일을 쓴다.
+    """
     url = _GH_LISTING_URL.format(date=date.strftime("%Y-%m-%d"))
     try:
-        df = pd.read_csv(url, index_col=0, dtype={"Code": str})
+        df = _fetch_csv(url)
     except Exception:
         return None
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    for col in _NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "Close" not in df.columns or not df["Close"].notna().any():
+        return None
+    return df
 
 
 def _nearest_snapshot(around: pd.Timestamp, max_back_days: int = 10):
@@ -113,6 +141,9 @@ def screen(
 
     markets = _KRX_MARKETS if market == "ALL" else (market,)
     merged = merged[merged["Market"].isin(markets)]
+    # 거래정지 등으로 종가가 없는 행은 제외한다 — 이 테이블을 쓰는 모든 호출부(차트·
+    # 워치리스트·모의투자 시가평가)가 가격이 있다고 전제하므로 NaN을 흘려보내면 안 된다.
+    merged = merged[merged["Close"].notna()]
     if min_marcap:
         merged = merged[merged["Marcap"] >= min_marcap]
     if min_volume:
